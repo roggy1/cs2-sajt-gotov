@@ -24,9 +24,7 @@ import {
   type Wear,
 } from "@/lib/skins";
 import { useCatalog } from "@/lib/catalog/useCatalog";
-import { useLivePriceFetcher, type LivePriceOutcome } from "@/lib/livePrice";
-import { usePriceDump } from "@/lib/priceDumpStore";
-import { isDumpMarket } from "@/lib/priceDumpParse";
+import { useLivePriceFetcher } from "@/lib/livePrice";
 import { feeBreakdown } from "@/lib/fees";
 import { useItemPageState, buildMarketHashName } from "@/lib/itemPage";
 import { stripPhaseSuffix } from "@/lib/catalog/doppler";
@@ -75,40 +73,10 @@ function ItemContent() {
   const { id } = Route.useParams();
   const { activeId } = usePortfolio();
   const { data: catalog, isLoading } = useCatalog();
-  const { fetchFor: fetchLive } = useLivePriceFetcher();
-  const priceDump = usePriceDump();
-
-  /**
-   * One price, from the dump wherever the dump covers the market.
-   *
-   * Steam, CSFloat and Skinport are all answered out of the object the
-   * provider already downloaded — no request, so this page cannot queue,
-   * rate-limit or hang the way it used to. Market.CSGO is not in the dump
-   * and keeps its own route, which has never been IP-blocked and reports a
-   * live listing count.
-   */
-  const fetchFor = useCallback(
-    async (
-      skin: { name: string; phase?: string | undefined; paintIndex?: string | undefined },
-      market: MarketplaceId,
-      force = false,
-      withCount = false,
-    ): Promise<LivePriceOutcome> => {
-      if (isDumpMarket(market)) {
-        const quote = priceDump.quote(skin.name, market);
-        return quote
-          ? {
-              priceEur: quote.priceEur,
-              status: "ok",
-              cached: true,
-              listingCount: quote.listingCount,
-            }
-          : { priceEur: null, status: "no_listings", cached: true };
-      }
-      return fetchLive(skin, market, force, withCount);
-    },
-    [priceDump, fetchLive],
-  );
+  // Steam, CSFloat and Skinport come out of the browser's price dump; only
+  // Market.CSGO still has a route behind it. `fetchFor` hides that
+  // difference, so nothing on this page makes a per-item price request.
+  const { fetchFor } = useLivePriceFetcher();
   const { marketplace, steamTaxPercent } = useMarketplace();
   const navigate = useNavigate();
 

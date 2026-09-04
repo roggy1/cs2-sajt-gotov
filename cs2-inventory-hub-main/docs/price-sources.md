@@ -29,12 +29,26 @@ has to do this once per session rather than once per invocation.
   the server module so the two can never disagree about what counts as a
   price.
 
-**No row in any table makes a price request.** The per-item hooks are not even
-imported by `InventorySection` any more — the surest way to guarantee a
-component cannot make a request is to not give it the means. A price cell
-shows a figure or "No listings"; there is no per-row loading state left,
-because there is nothing to wait for. The one honest spinner is on the single
-dump download, shared by the whole page.
+**Nothing in the app makes a per-item price request any more.** Not the table,
+not the add form, not the Steam import, not the wishlist, not the Inspect
+page. `useCsfloatPrice`, `useSteamPrice`, `useSkinportPrice` and
+`prefetchSteamPrices` are **deleted**, not merely unused — the surest way to
+guarantee a component cannot reintroduce a per-item fetch is for it not to
+exist. `useLivePriceFetcher` is the single entry point and reads the dump
+synchronously; Market.CSGO is the one market still behind a route, because it
+is not in the dump, has never been IP-blocked, and answers the whole catalogue
+in one cached server-side request.
+
+A price cell shows a figure or "No listings"; there is no per-row loading
+state left, because there is nothing to wait for. The one honest spinner is on
+the single dump download, shared by the whole page.
+
+**The add form no longer requires a market price.** It used to, back when the
+form fetched one per skin — the field was filled in for you, so demanding it
+was invisible. Reading from the dump means a skin the dump does not cover
+leaves the field empty, which turned "we have no price for this yet" into
+"Please enter the current market price" and blocked a perfectly valid holding.
+What the user knows is what they PAID; the current price is ours to find.
 
 The server module and `/api/prices` are kept for the routes that still answer
 per item (and for anything running without a browser), but they are no longer

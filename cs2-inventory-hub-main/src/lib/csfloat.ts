@@ -58,74 +58,14 @@ export function toMarketHashName(name: string, wear?: string, souvenir?: boolean
   return normalizeMarketHashName(assembled);
 }
 
-/** Fetches the live CSFloat price via our server proxy — never calls CSFloat directly from the browser. */
-async function fetchCsfloatPrice(
-  marketHashName: string,
-  paintIndex?: string,
-  phase?: string,
-  floatValue?: number,
-  withCount?: boolean,
-): Promise<CsfloatPriceResponse> {
-  const params = new URLSearchParams({ name: marketHashName });
-  if (paintIndex) params.set("paintIndex", paintIndex);
-  if (phase) params.set("phase", phase);
-  if (floatValue !== undefined) params.set("float", String(floatValue));
-  if (withCount) params.set("withCount", "1");
-
-  const res = await fetch(`/api/csfloat-price?${params.toString()}`);
-  const body = (await res.json()) as CsfloatPriceResponse;
-  if (!res.ok || body.error) throw new Error(body.error ?? `Request failed (${res.status})`);
-  return body;
-}
-
-/**
- * Hook that fetches a single skin's live CSFloat price on demand (call
- * `.mutate({ name, wear, paintIndex, floatValue })`). When `paintIndex` is
- * provided (Doppler/Gamma Doppler phase), the server VERIFIES every
- * candidate listing's own reported paint_index before accepting its price —
- * it will return null rather than silently fall back to a different
- * phase's price. Converts cents→USD→EUR using the app's existing FX rate.
+/* The per-item CSFloat lookup that used to live here is GONE.
+ *
+ * It fetched /api/csfloat-price once per skin, which on a shared Vercel IP
+ * meant 429s and requests stuck on `(pending)` — and, because the client
+ * paced them through one queue, a single stuck request stalled the whole
+ * table. Prices now come from the browser's price dump (priceDumpStore),
+ * read synchronously with no request at all.
+ *
+ * The hook is deleted rather than merely unused on purpose: a component
+ * cannot accidentally reintroduce a per-item fetch that does not exist.
  */
-export function useCsfloatPrice(usdToEurRate: number) {
-  return useMutation({
-    mutationFn: async ({
-      name,
-      wear,
-      souvenir,
-      paintIndex,
-      phase,
-      floatValue,
-      withCount,
-    }: {
-      name: string;
-      wear?: string;
-      souvenir?: boolean;
-      paintIndex?: string;
-      phase?: string;
-      floatValue?: number;
-      withCount?: boolean;
-    }): Promise<CsfloatPriceResult> => {
-      const marketHashName = toMarketHashName(name, wear, souvenir);
-      const { priceCents, exactFloatMatch, listingCount, status } = await fetchCsfloatPrice(
-        marketHashName,
-        paintIndex,
-        phase,
-        floatValue,
-        withCount,
-      );
-      // Treat a missing OR zero price as "no listing" — writing 0 into the
-      // portfolio would silently wipe out that holding's value and wreck
-      // the profit/loss totals.
-      if (priceCents === null || priceCents <= 0) {
-        return { priceEur: null, exactFloatMatch: false, status: status ?? "ok" };
-      }
-      const usd = priceCents / 100;
-      return {
-        priceEur: usd / usdToEurRate,
-        exactFloatMatch: exactFloatMatch ?? false,
-        listingCount,
-        status: status ?? "ok",
-      };
-    },
-  });
-}

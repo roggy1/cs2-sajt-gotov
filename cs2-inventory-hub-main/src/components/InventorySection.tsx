@@ -385,7 +385,16 @@ export function InventorySection({
     const nextErrors: typeof errors = {};
     if (!name.trim()) nextErrors.name = t("errorRequiredName");
     if (buyPrice === "") nextErrors.buyPrice = t("errorRequiredBuyPrice");
-    if (marketPrice === "") nextErrors.marketPrice = t("errorRequiredMarketPrice");
+    // The market price is NOT required.
+    //
+    // It used to be, back when the form fetched it per skin: the field was
+    // filled in for you, so demanding it was invisible. Now it is read from
+    // the price dump, and a skin the dump does not cover left the field
+    // empty — which turned "we have no price for this yet" into "Please
+    // enter the current market price" and blocked the user from adding a
+    // holding they had every right to add. What they know is what they
+    // PAID; the current price is ours to find, and an empty field simply
+    // means we have not found it yet.
 
     if (Object.keys(nextErrors).length > 0) {
       setErrors(nextErrors);
@@ -398,7 +407,6 @@ export function InventorySection({
       const missing = [
         nextErrors.name && t("skinName"),
         nextErrors.buyPrice && t("buyPrice"),
-        nextErrors.marketPrice && t("marketPrice"),
       ].filter(Boolean) as string[];
 
       showFormToast({
