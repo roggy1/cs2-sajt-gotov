@@ -290,11 +290,15 @@ export function InventorySection({
           floatValue: skin.floatValue,
         });
         priceEur = result.priceEur;
-        successMessage = result.exactFloatMatch ? t("csfloatUpdated") : t("csfloatUpdatedApprox");
+        // The lookup is no longer float-conditional, so a price is simply
+        // the market's cheapest Buy Now listing and "no price" means the
+        // item has no listings at all — not that this copy's float could
+        // not be matched, which is what the old wording claimed.
+        successMessage = t("csfloatUpdated");
         if (priceEur === null && opts?.notify) {
           showPriceToast({
             variant: "warning",
-            title: t("csfloatNoMatch"),
+            title: t("noListings"),
             description: catalogDisplayName(skin),
             market: marketplace,
           });

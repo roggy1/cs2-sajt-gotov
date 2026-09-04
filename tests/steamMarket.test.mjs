@@ -285,3 +285,72 @@ test("Doppler-style names round-trip through URL encoding intact", async () => {
   assert.ok(url.includes(encodeURIComponent(tricky)), "name must be percent-encoded in the path");
   assert.ok(!url.includes("★"), "raw non-ASCII in a URL path is how these lookups silently 404");
 });
+
+/* -------------------------------------------------------------------------
+ * Which endpoint a PRICE-ONLY lookup opens with.
+ *
+ * This is the difference between Steam prices loading and not loading at
+ * all on a shared cloud IP: `render` answers price and count together but
+ * has the tightest per-IP budget, so opening with it meant a portfolio
+ * refresh — which wants nothing but prices — spent its first request on the
+ * endpoint most likely to 429.
+ * ---------------------------------------------------------------------- */
+
+const overviewOk = () =>
+  json({ success: true, lowest_price: "12,34€", median_price: "13,00€", volume: "1,234" });
+
+test("a price-only lookup goes straight to priceoverview, not to render", async () => {
+  const { getSteamQuote } = await freshModule();
+  const calls = stubFetch([
+    ["/priceoverview/", overviewOk],
+    ["/render/", () => json({}, 429)],
+  ]);
+
+  const quote = await getSteamQuote(NAME, { withCount: false });
+
+  assert.equal(quote.priceEur, 12.34, "reports Steam's LOWEST listing price");
+  assert.equal(quote.status, "ok");
+  assert.equal(calls.length, 1, "exactly one Steam call");
+  assert.ok(calls[0].includes("/priceoverview/"), `opened with ${calls[0]}`);
+  assert.ok(
+    !calls.some((c) => c.includes("/listings/730/")),
+    "the tightly-limited listings endpoint must not be touched",
+  );
+});
+
+test("price-only falls back to render when priceoverview has nothing", async () => {
+  const { getSteamQuote } = await freshModule();
+  const calls = stubFetch([
+    ["/priceoverview/", () => json({ success: false })],
+    ["/render/", renderOk],
+  ]);
+
+  const quote = await getSteamQuote(NAME, { withCount: false });
+
+  assert.equal(quote.priceEur, 38.44, "recovers via render rather than reporting n/a");
+  assert.ok(calls[0].includes("/priceoverview/"), "cheap endpoint still goes first");
+  assert.ok(
+    calls.some((c) => c.includes("/listings/730/")),
+    "render is the fallback, not the opening move",
+  );
+});
+
+test("a price-only lookup still reports volume when asked", async () => {
+  const { getSteamQuote } = await freshModule();
+  stubFetch([["/priceoverview/", overviewOk]]);
+
+  const quote = await getSteamQuote(NAME, { withCount: false, withVolume: true });
+
+  assert.equal(quote.priceEur, 12.34);
+  assert.equal(quote.volume24h, 1234, "24h volume comes from the same response");
+});
+
+test("asking for a count still uses the one-request render path", async () => {
+  const { getSteamQuote } = await freshModule();
+  const calls = stubFetch([["/render/", renderOk]]);
+
+  const quote = await getSteamQuote(NAME, { withCount: true });
+
+  assert.equal(quote.listingCount, 1229);
+  assert.equal(calls.length, 1, "count + price still cost exactly one call");
+});

@@ -129,8 +129,14 @@ function readApiKey(): string | undefined {
 
 /** Upstream refused us rather than failed — worth reporting differently. */
 class CsfloatRejected extends Error {
-  constructor(readonly status: number) {
+  // Written out rather than a TS parameter property so this module stays
+  // loadable by plain `node --experimental-strip-types`, which is how the
+  // route's logic is tested without spinning up a bundler.
+  readonly status: number;
+
+  constructor(status: number) {
     super(`CSFloat responded ${status}`);
+    this.status = status;
   }
 }
 
@@ -303,33 +309,53 @@ export const Route = createFileRoute("/api/csfloat-price")({
           const apiKey = readApiKey();
 
           try {
-            let matches: CsfloatListing[] = [];
-            let exactFloatMatch = false;
+            /**
+             * ONE query: the cheapest Buy Now listing for this exact
+             * market_hash_name (the wear is already part of that name).
+             *
+             * Float is deliberately NOT part of the question any more. The
+             * old version asked first for listings within ±0.001 of the
+             * user's own float and only then widened, which meant a normal
+             * holding with a recorded float usually spent a request on a
+             * window nobody is selling in — and any hiccup on the second
+             * query surfaced as "No matching CSFloat listing found for this
+             * float" when the item in fact had dozens of listings. A
+             * portfolio wants the market price of the skin, not the price
+             * of a twin of one particular copy.
+             */
+            const listings = await queryListings(apiKey, marketHashName, paintIndex);
 
-            // Tier 1: exact float condition (verified phase, if we have one).
-            if (hasFloat) {
-              const minFloat = Math.max(0, floatValue! - FLOAT_TOLERANCE);
-              const maxFloat = Math.min(1, floatValue! + FLOAT_TOLERANCE);
-              const listings = await queryListings(
-                apiKey,
-                marketHashName,
-                paintIndex,
-                minFloat,
-                maxFloat,
-              );
-              matches = verifiedListings(listings, paintIndex, phase);
-              exactFloatMatch = matches.length > 0;
-            }
+            /**
+             * Phase is still verified, and that is a different thing from
+             * float: Doppler phases share one market_hash_name, so the
+             * cheapest listing overall can be a Phase 1 when the user owns
+             * a Ruby. Returning that would be a wrong price, not an
+             * approximate one. For everything else this filter is a no-op.
+             */
+            const matches = verifiedListings(listings, paintIndex, phase);
 
-            // Tier 2: no listings verified at that exact float — widen to any
-            // float, still verifying phase before accepting a price.
-            if (matches.length === 0) {
-              const listings = await queryListings(apiKey, marketHashName, paintIndex);
-              matches = verifiedListings(listings, paintIndex, phase);
-              exactFloatMatch = false;
-            }
+            // Cheapest first is what CSFloat sorts by, but the minimum is
+            // taken explicitly so the answer does not depend on their sort
+            // surviving a future API change.
+            const priceCents = matches.reduce<number | null>(
+              (lowest, l) =>
+                typeof l.price === "number" && l.price > 0 && (lowest === null || l.price < lowest)
+                  ? l.price
+                  : lowest,
+              null,
+            );
 
-            const priceCents = matches[0]?.price ?? null;
+            // Kept in the response for compatibility. It now means "this
+            // price came from a listing with a float close to yours", which
+            // is informational only and never gates the price.
+            const exactFloatMatch =
+              hasFloat &&
+              matches.some((l) => {
+                const f = l.item?.float_value;
+                return (
+                  typeof f === "number" && Math.abs(f - (floatValue as number)) <= FLOAT_TOLERANCE
+                );
+              });
 
             // Counted only when asked for — it costs extra requests.
             const exactCount =

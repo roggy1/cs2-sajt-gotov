@@ -586,16 +586,37 @@ async function fetchFresh(
   let volume24h: number | undefined;
   let rateLimited = false;
 
-  try {
-    const render = await fetchRender(marketHashName);
-    priceEur = render.priceEur;
-    listingCount = render.listingCount;
-  } catch (err) {
-    if (err instanceof RateLimited) rateLimited = true;
-    else console.warn(`[steam] render failed for "${marketHashName}":`, (err as Error).message);
+  /**
+   * Does this caller actually need a listing COUNT?
+   *
+   * It decides which endpoint we open with, and that turned out to be the
+   * difference between Steam prices loading and not loading at all on a
+   * shared cloud IP. `render` is the only endpoint that answers price and
+   * count together, but it also has by far the tightest budget — so
+   * starting there meant a plain portfolio refresh, which wants nothing but
+   * prices, spent its first request on the endpoint most likely to 429 and
+   * only then limped to the cheap one. Now the heavy call is made only when
+   * its extra answer is wanted (the Inspect page), and a bulk refresh goes
+   * straight to `priceoverview`, which is both the most tolerant endpoint
+   * and the one that reports the LOWEST listing price.
+   *
+   * `undefined` still means "yes" so that existing callers (and the tests)
+   * keep the original behaviour; the route passes an explicit false.
+   */
+  const wantsCount = opts.withCount !== false;
+
+  if (wantsCount) {
+    try {
+      const render = await fetchRender(marketHashName);
+      priceEur = render.priceEur;
+      listingCount = render.listingCount;
+    } catch (err) {
+      if (err instanceof RateLimited) rateLimited = true;
+      else console.warn(`[steam] render failed for "${marketHashName}":`, (err as Error).message);
+    }
   }
 
-  const needsCount = opts.withCount !== false && listingCount === undefined;
+  const needsCount = wantsCount && listingCount === undefined;
   const needsPrice = priceEur === null;
   const needsVolume = opts.withVolume === true;
 
@@ -625,6 +646,22 @@ async function fetchFresh(
       if (overviewResult.value.priceEur !== null) rateLimited = false;
     } else if (overviewResult.reason instanceof RateLimited) {
       rateLimited = true;
+    }
+  }
+
+  // Price-only request whose cheap endpoint came up empty: `render` is
+  // still worth one try, because it is a different budget and answers for
+  // items priceoverview refuses. It is the fallback here rather than the
+  // opening move, which is the whole point of the reordering above.
+  if (!wantsCount && priceEur === null) {
+    try {
+      const render = await fetchRender(marketHashName);
+      priceEur = render.priceEur;
+      listingCount = render.listingCount;
+      if (priceEur !== null) rateLimited = false;
+    } catch (err) {
+      if (err instanceof RateLimited) rateLimited = true;
+      else console.warn(`[steam] render failed for "${marketHashName}":`, (err as Error).message);
     }
   }
 
