@@ -9,7 +9,51 @@ const CSFLOAT_LISTINGS_URL = "https://csfloat.com/api/v1/listings";
 // float to count as "the same condition" for price matching.
 const FLOAT_TOLERANCE = 0.001;
 
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+/* -------------------------------------------------------------------------
+ * Cache + throttle
+ *
+ * CSFloat answers a shared cloud IP with 429 long before it answers a
+ * laptop, because the budget belongs to the ADDRESS and on Vercel that
+ * address is shared with every other tenant on the edge. A portfolio
+ * refresh firing one request per holding as fast as the event loop allows
+ * is exactly the traffic shape that trips it.
+ *
+ * Three things keep this route inside the budget, and all three matter:
+ *
+ *   1. A price is remembered for FRESH_TTL and served from memory — a
+ *      second lookup of the same skin costs nothing at all.
+ *   2. Past that, the remembered price is still served immediately while a
+ *      refresh runs behind it (stale-while-revalidate), so a slow or
+ *      throttled upstream is never something the user waits for.
+ *   3. Upstream calls are serialised with a gap between them, so twenty
+ *      holdings become twenty paced requests rather than twenty
+ *      simultaneous ones.
+ *
+ * And when 429 arrives anyway, the last known price is what comes back.
+ * ---------------------------------------------------------------------- */
+
+/** A price this new is served without asking CSFloat at all. */
+const FRESH_TTL_MS = 12 * 60 * 1000;
+/** Older than FRESH but still worth showing while a refresh runs behind. */
+const STALE_TTL_MS = 6 * 60 * 60 * 1000;
+/** After a failure, don't retry this item for a while. */
+const ERROR_BACKOFF_MS = 60 * 1000;
+/** Pause between consecutive upstream calls (the "batching" delay). */
+const REQUEST_GAP_MS = Number(process.env["CSFLOAT_GAP_MS"] ?? "300");
+/** One at a time: parallelism is what makes a gap meaningless. */
+const MAX_CONCURRENT = 1;
+/** How long to stand down after CSFloat says 429, doubling each time. */
+const COOLDOWN_MS = 5_000;
+const MAX_COOLDOWN_MS = 2 * 60 * 1000;
+/**
+ * How long a request may sit in the queue before we answer from cache
+ * instead.
+ *
+ * Pacing a refresh is right; making the fortieth holding hold a serverless
+ * invocation open for twelve seconds is not — the platform kills it, and
+ * the user gets a failure where a slightly older price would have done.
+ */
+const MAX_QUEUE_WAIT_MS = 4_000;
 
 // How many listings we pull per lookup. Doubles as the ceiling for the
 // reported listing count, so the two must never drift apart.
@@ -26,8 +70,90 @@ type CacheEntry = {
    * for a count — such an entry must NOT satisfy one that does. */
   listingCount?: number;
   fetchedAt: number;
+  /** When the last attempt to refresh this entry failed. */
+  failedAt?: number;
 };
-const cache = new Map<string, CacheEntry>();
+
+/**
+ * Pinned to globalThis, like the Steam layer's cache.
+ *
+ * Vite re-evaluates this module on every edit and a serverless runtime
+ * reuses a warm instance across invocations; a plain module-level Map would
+ * quietly become two Maps under HMR, each believing it holds the only copy
+ * of the rate budget.
+ */
+const CACHE_KEY = "__cs2hub_csfloat_cache__";
+const INFLIGHT_KEY = "__cs2hub_csfloat_inflight__";
+const globalStore = globalThis as typeof globalThis & {
+  [CACHE_KEY]?: Map<string, CacheEntry>;
+  [INFLIGHT_KEY]?: Map<string, Promise<CacheEntry>>;
+};
+const cache: Map<string, CacheEntry> = (globalStore[CACHE_KEY] ??= new Map());
+/** One upstream lookup per item at a time, however many callers ask. */
+const inFlight: Map<string, Promise<CacheEntry>> = (globalStore[INFLIGHT_KEY] ??= new Map());
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Serialises upstream calls and spaces them out.
+ *
+ * The cooldown is the part that matters under a real 429: without it the
+ * queue keeps feeding requests into a door that is already closed, which is
+ * how a rate limit turns from a pause into a ban. Each refusal doubles the
+ * wait, and the first success clears it.
+ */
+class Throttle {
+  private active = 0;
+  private queue: (() => void)[] = [];
+  private nextSlotAt = 0;
+  private cooldownMs = 0;
+
+  /**
+   * Roughly how long a call queued right now would wait for its slot.
+   *
+   * Counts the BACKLOG, not just the next slot: `nextSlotAt` only advances
+   * as tasks start, so on its own it never shows more than one gap ahead
+   * however many callers are waiting — which would make the congestion
+   * guard that reads this permanently blind.
+   */
+  estimatedWaitMs(): number {
+    const ahead = this.queue.length + this.active;
+    const perCall = REQUEST_GAP_MS + this.cooldownMs;
+    return ahead * perCall + Math.max(0, this.nextSlotAt - Date.now());
+  }
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    while (this.active >= MAX_CONCURRENT) {
+      await new Promise<void>((resolve) => this.queue.push(resolve));
+    }
+    this.active += 1;
+    try {
+      const now = Date.now();
+      const earliest = Math.max(now, this.nextSlotAt);
+      this.nextSlotAt = earliest + REQUEST_GAP_MS + this.cooldownMs;
+      if (earliest > now) await sleep(earliest - now);
+      const result = await task();
+      this.cooldownMs = 0; // it worked — stop standing down
+      return result;
+    } catch (err) {
+      if (err instanceof CsfloatRejected && err.status === 429) {
+        this.cooldownMs = Math.min(
+          this.cooldownMs > 0 ? this.cooldownMs * 2 : COOLDOWN_MS,
+          MAX_COOLDOWN_MS,
+        );
+        console.warn(`[csfloat] 429 — backing off ${this.cooldownMs}ms between calls`);
+      }
+      throw err;
+    } finally {
+      this.active -= 1;
+      this.queue.shift()?.();
+    }
+  }
+}
+
+const THROTTLE_KEY = "__cs2hub_csfloat_throttle__";
+const throttleStore = globalThis as typeof globalThis & { [THROTTLE_KEY]?: Throttle };
+const throttle: Throttle = (throttleStore[THROTTLE_KEY] ??= new Throttle());
 
 interface CsfloatListing {
   id?: string;
@@ -55,13 +181,15 @@ function listingPhase(l: CsfloatListing): string | undefined {
   return l.item?.phase ?? l.phase;
 }
 
-function cacheKey(
-  marketHashName: string,
-  paintIndex?: string,
-  phase?: string,
-  floatValue?: number,
-): string {
-  return `${marketHashName}::${paintIndex ?? ""}::${phase ?? ""}::${floatValue ?? ""}`;
+/**
+ * What makes two lookups "the same question".
+ *
+ * Float is NOT part of it: the route prices the SKIN, not one particular
+ * copy of it, so keying by float would split one answer into as many cache
+ * entries as the user has copies — and spend an upstream call on each.
+ */
+function cacheKey(marketHashName: string, paintIndex?: string, phase?: string): string {
+  return `${marketHashName}::${paintIndex ?? ""}::${phase ?? ""}`;
 }
 
 /**
@@ -257,6 +385,222 @@ function verifiedListings(
   });
 }
 
+/* -------------------------------------------------------------------------
+ * Lookup policy
+ * ---------------------------------------------------------------------- */
+
+interface LookupParams {
+  marketHashName: string;
+  paintIndex?: string | undefined;
+  phase?: string | undefined;
+  floatValue?: number | undefined;
+  wantsCount: boolean;
+}
+
+/** One live lookup: the cheapest Buy Now listing, throttled and paced. */
+async function fetchFresh(params: LookupParams): Promise<CacheEntry> {
+  const { marketHashName, paintIndex, phase, floatValue, wantsCount } = params;
+  const apiKey = readApiKey();
+
+  return throttle.run(async () => {
+    /**
+     * ONE query: the cheapest Buy Now listing for this exact
+     * market_hash_name (the wear is already part of that name).
+     *
+     * Float is deliberately NOT part of the question. Asking for listings
+     * within ±0.001 of the user's own float spends a request on a window
+     * nobody is selling in, and made a perfectly liquid skin report "no
+     * matching listing for this float".
+     */
+    const listings = await queryListings(apiKey, marketHashName, paintIndex);
+
+    /**
+     * Phase IS still verified, which is a different thing from float:
+     * Doppler phases share one market_hash_name, so the cheapest listing
+     * overall can be a Phase 1 when the user owns a Ruby. That would be a
+     * wrong price, not an approximate one.
+     */
+    const matches = verifiedListings(listings, paintIndex, phase);
+
+    // Cheapest first is what CSFloat sorts by, but the minimum is taken
+    // explicitly so the answer does not depend on their sort surviving a
+    // future API change.
+    const priceCents = matches.reduce<number | null>(
+      (lowest, l) =>
+        typeof l.price === "number" && l.price > 0 && (lowest === null || l.price < lowest)
+          ? l.price
+          : lowest,
+      null,
+    );
+
+    // Informational only: "the price came from a listing with a float close
+    // to yours". It never gates the price any more.
+    const exactFloatMatch =
+      floatValue !== undefined &&
+      matches.some((l) => {
+        const f = l.item?.float_value;
+        return typeof f === "number" && Math.abs(f - floatValue) <= FLOAT_TOLERANCE;
+      });
+
+    // Counted only when asked for — it costs extra requests.
+    const listingCount = wantsCount
+      ? await countListings(apiKey, marketHashName, paintIndex, phase)
+      : undefined;
+
+    const entry: CacheEntry = { priceCents, exactFloatMatch, fetchedAt: Date.now() };
+    if (listingCount !== undefined) entry.listingCount = listingCount;
+    return entry;
+  });
+}
+
+/** Runs at most one live lookup per cache key at a time. */
+function fetchDeduped(key: string, params: LookupParams): Promise<CacheEntry> {
+  const existing = inFlight.get(key);
+  if (existing) return existing;
+
+  const promise = fetchFresh(params)
+    .then((entry) => {
+      cache.set(key, entry);
+      return entry;
+    })
+    .catch((err: unknown) => {
+      // Remember the FAILURE against the previous value, so the price is
+      // kept and the backoff has something to hang on.
+      const previous = cache.get(key);
+      if (previous) cache.set(key, { ...previous, failedAt: Date.now() });
+      throw err;
+    })
+    .finally(() => {
+      inFlight.delete(key);
+    });
+
+  inFlight.set(key, promise);
+  return promise;
+}
+
+interface QuoteResult {
+  priceCents: number | null;
+  exactFloatMatch: boolean;
+  listingCount?: number | undefined;
+  cached: boolean;
+  stale?: boolean | undefined;
+  status?: "ok" | "unauthorized" | "rate_limited" | "error" | undefined;
+  upstreamStatus?: number | undefined;
+}
+
+/**
+ * Cache-first, stale-while-revalidate, and never louder than the situation.
+ *
+ * The order below is the whole rate-limit strategy:
+ *   fresh cache → answer, no upstream call at all
+ *   stale cache → answer NOW, refresh quietly behind
+ *   nothing     → one throttled call, and on failure whatever we knew
+ */
+async function getQuote(key: string, params: LookupParams): Promise<QuoteResult> {
+  const entry = cache.get(key);
+  const now = Date.now();
+
+  // An entry written without a count must not satisfy a request that wants
+  // one, or the inventory table would leave the item page showing n/a.
+  const satisfies = entry && !(params.wantsCount && entry.listingCount === undefined);
+
+  if (entry && satisfies) {
+    const age = now - entry.fetchedAt;
+    if (age < FRESH_TTL_MS) {
+      return {
+        priceCents: entry.priceCents,
+        exactFloatMatch: entry.exactFloatMatch,
+        listingCount: entry.listingCount,
+        cached: true,
+      };
+    }
+
+    if (age < STALE_TTL_MS) {
+      // Refresh behind the answer, unless this item failed very recently.
+      // The catch matters: an unhandled rejection from a background task
+      // takes the whole server process down.
+      if (!entry.failedAt || now - entry.failedAt > ERROR_BACKOFF_MS) {
+        void fetchDeduped(key, params).catch(() => undefined);
+      }
+      return {
+        priceCents: entry.priceCents,
+        exactFloatMatch: entry.exactFloatMatch,
+        listingCount: entry.listingCount,
+        cached: true,
+        stale: true,
+      };
+    }
+  }
+
+  // Congested: the queue ahead of this request is longer than a serverless
+  // invocation should be held open. A known price now beats a fresh price
+  // that arrives after the platform has already killed the function.
+  if (entry && entry.priceCents !== null && throttle.estimatedWaitMs() > MAX_QUEUE_WAIT_MS) {
+    if (!entry.failedAt || now - entry.failedAt > ERROR_BACKOFF_MS) {
+      void fetchDeduped(key, params).catch(() => undefined);
+    }
+    return {
+      priceCents: entry.priceCents,
+      exactFloatMatch: entry.exactFloatMatch,
+      listingCount: entry.listingCount,
+      cached: true,
+      stale: true,
+      status: "ok",
+    };
+  }
+
+  try {
+    const fresh = await fetchDeduped(key, params);
+    return {
+      priceCents: fresh.priceCents,
+      exactFloatMatch: fresh.exactFloatMatch,
+      listingCount: fresh.listingCount,
+      cached: false,
+    };
+  } catch (err) {
+    const rejected = err instanceof CsfloatRejected ? err.status : null;
+
+    // THE 429 RULE: a refusal must never cost the user a price they already
+    // had. Any age is acceptable here — a price from this morning is a fact
+    // about the market; an empty cell is not.
+    if (entry && entry.priceCents !== null) {
+      return {
+        priceCents: entry.priceCents,
+        exactFloatMatch: entry.exactFloatMatch,
+        listingCount: entry.listingCount,
+        cached: true,
+        stale: true,
+        // Deliberately "ok": the user is looking at a real price, and a
+        // warning toast about rate limits would be about our plumbing
+        // rather than about their portfolio.
+        status: "ok",
+      };
+    }
+
+    if (rejected !== null) {
+      console.warn(
+        `[csfloat] upstream ${rejected} for "${params.marketHashName}"` +
+          (rejected === 429 ? " — throttling further calls" : ""),
+      );
+    } else {
+      console.warn(`[csfloat] lookup failed for "${params.marketHashName}":`, err);
+    }
+
+    return {
+      priceCents: null,
+      exactFloatMatch: false,
+      cached: false,
+      status:
+        rejected === 401 || rejected === 403
+          ? "unauthorized"
+          : rejected === 429
+            ? "rate_limited"
+            : "error",
+      upstreamStatus: rejected ?? undefined,
+    };
+  }
+}
+
 export const Route = createFileRoute("/api/csfloat-price")({
   server: {
     handlers: {
@@ -265,154 +609,35 @@ export const Route = createFileRoute("/api/csfloat-price")({
         // price-shaped body. An uncaught throw here is a 500/502 on Vercel,
         // and the client turns that into a failed refresh for the WHOLE
         // portfolio rather than one missing cell.
-        let marketHashName: string | null = null;
+        let name: string | null = null;
         try {
           const url = new URL(request.url);
-          marketHashName = url.searchParams.get("name");
-          const floatParam = url.searchParams.get("float");
-          const paintIndex = url.searchParams.get("paintIndex") ?? undefined;
-          const phase = url.searchParams.get("phase") ?? undefined;
-
-          if (!marketHashName) {
+          name = url.searchParams.get("name");
+          if (!name) {
             return Response.json({ error: "Missing 'name' query parameter" }, { status: 400 });
           }
 
-          const floatValue = floatParam !== null ? Number(floatParam) : undefined;
-          const hasFloat = floatValue !== undefined && Number.isFinite(floatValue);
+          const floatParam = url.searchParams.get("float");
+          const parsedFloat = floatParam !== null ? Number(floatParam) : Number.NaN;
+          const floatValue = Number.isFinite(parsedFloat) ? parsedFloat : undefined;
+          const paintIndex = url.searchParams.get("paintIndex") ?? undefined;
+          const phase = url.searchParams.get("phase") ?? undefined;
+          const wantsCount = url.searchParams.get("withCount") === "1";
 
-          const key = cacheKey(
-            marketHashName,
+          // The float is NOT part of the key any more: two copies of the
+          // same skin now get the same answer, so keying by float would
+          // just be two cache entries and two upstream calls for one price.
+          const key = cacheKey(name, paintIndex, phase);
+          const quote = await getQuote(key, {
+            marketHashName: name,
             paintIndex,
             phase,
-            hasFloat ? floatValue : undefined,
-          );
-          const cached = cache.get(key);
-          const wantsCount = url.searchParams.get("withCount") === "1";
-          // A cached entry only counts as a hit if it carries everything this
-          // request needs. Without this check, the inventory table (which
-          // never asks for counts) poisons the cache and the item page shows
-          // n/a for the next ten minutes.
-          const cacheSatisfies = cached && !(wantsCount && cached.listingCount === undefined);
-
-          if (cached && cacheSatisfies && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-            return Response.json({
-              priceCents: cached.priceCents,
-              exactFloatMatch: cached.exactFloatMatch,
-              listingCount: cached.listingCount,
-              cached: true,
-            });
-          }
-
-          // Set this in the Vercel project's Environment Variables. Without
-          // it a cloud deployment shares an anonymous quota with every other
-          // tenant on the same egress IP — see `csfloatHeaders`.
-          const apiKey = readApiKey();
-
-          try {
-            /**
-             * ONE query: the cheapest Buy Now listing for this exact
-             * market_hash_name (the wear is already part of that name).
-             *
-             * Float is deliberately NOT part of the question any more. The
-             * old version asked first for listings within ±0.001 of the
-             * user's own float and only then widened, which meant a normal
-             * holding with a recorded float usually spent a request on a
-             * window nobody is selling in — and any hiccup on the second
-             * query surfaced as "No matching CSFloat listing found for this
-             * float" when the item in fact had dozens of listings. A
-             * portfolio wants the market price of the skin, not the price
-             * of a twin of one particular copy.
-             */
-            const listings = await queryListings(apiKey, marketHashName, paintIndex);
-
-            /**
-             * Phase is still verified, and that is a different thing from
-             * float: Doppler phases share one market_hash_name, so the
-             * cheapest listing overall can be a Phase 1 when the user owns
-             * a Ruby. Returning that would be a wrong price, not an
-             * approximate one. For everything else this filter is a no-op.
-             */
-            const matches = verifiedListings(listings, paintIndex, phase);
-
-            // Cheapest first is what CSFloat sorts by, but the minimum is
-            // taken explicitly so the answer does not depend on their sort
-            // surviving a future API change.
-            const priceCents = matches.reduce<number | null>(
-              (lowest, l) =>
-                typeof l.price === "number" && l.price > 0 && (lowest === null || l.price < lowest)
-                  ? l.price
-                  : lowest,
-              null,
-            );
-
-            // Kept in the response for compatibility. It now means "this
-            // price came from a listing with a float close to yours", which
-            // is informational only and never gates the price.
-            const exactFloatMatch =
-              hasFloat &&
-              matches.some((l) => {
-                const f = l.item?.float_value;
-                return (
-                  typeof f === "number" && Math.abs(f - (floatValue as number)) <= FLOAT_TOLERANCE
-                );
-              });
-
-            // Counted only when asked for — it costs extra requests.
-            const exactCount =
-              url.searchParams.get("withCount") === "1"
-                ? await countListings(apiKey, marketHashName, paintIndex, phase)
-                : undefined;
-            cache.set(key, { priceCents, exactFloatMatch, fetchedAt: Date.now() });
-            return Response.json({
-              priceCents,
-              exactFloatMatch,
-              cached: false,
-              // Exact, or absent. Never a capped stand-in.
-              listingCount: exactCount,
-            });
-          } catch (err) {
-            // A stale price beats no price: the item still exists and its
-            // value has not changed much in ten minutes.
-            if (cached) {
-              return Response.json({
-                priceCents: cached.priceCents,
-                exactFloatMatch: cached.exactFloatMatch,
-                cached: true,
-                stale: true,
-              });
-            }
-
-            const rejected = err instanceof CsfloatRejected ? err.status : null;
-            if (rejected !== null) {
-              console.warn(
-                `[csfloat] upstream ${rejected} for "${marketHashName}"` +
-                  (apiKey
-                    ? ""
-                    : " — no CSFLOAT_API_KEY set, which is required on shared cloud IPs"),
-              );
-            } else {
-              console.warn(`[csfloat] lookup failed for "${marketHashName}":`, err);
-            }
-
-            // 200 with an explicit status, NOT 502. The client's job here is
-            // to show "no price right now" on one row; a 5xx makes the whole
-            // request look broken, fills the browser console with red, and
-            // (on Vercel) is indistinguishable from the function crashing.
-            return Response.json({
-              priceCents: null,
-              exactFloatMatch: false,
-              cached: false,
-              status:
-                rejected === 401 || rejected === 403
-                  ? "unauthorized"
-                  : rejected === 429
-                    ? "rate_limited"
-                    : "error",
-              upstreamStatus: rejected ?? undefined,
-            });
-          }
+            floatValue,
+            wantsCount,
+          });
+          return Response.json(quote);
         } catch (err) {
-          console.error(`[csfloat] handler failed for "${marketHashName ?? "?"}":`, err);
+          console.error(`[csfloat] handler failed for "${name ?? "?"}":`, err);
           return Response.json({
             priceCents: null,
             exactFloatMatch: false,

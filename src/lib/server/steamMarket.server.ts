@@ -245,12 +245,22 @@ function makeLimiter(maxConcurrent: number, baseGapMs: number): AdaptiveLimiter 
   });
 }
 
+/**
+ * The pause between consecutive calls to the same endpoint.
+ *
+ * 300ms is the pace a portfolio refresh runs at: fast enough that twenty
+ * holdings finish in a few seconds, slow enough that Steam sees a person
+ * browsing rather than a script. Concurrency is deliberately low for the
+ * same reason — a gap means nothing if three requests leave together.
+ */
+const REQUEST_GAP_MS = envInt("STEAM_BASE_GAP_MS", 300);
+
 const limiters: Record<Endpoint, AdaptiveLimiter> = (globalStore[globalKey] ??= {
-  listings: makeLimiter(envInt("STEAM_MAX_CONCURRENT", 3), envInt("STEAM_BASE_GAP_MS", 350)),
-  search: makeLimiter(envInt("STEAM_SEARCH_CONCURRENT", 2), envInt("STEAM_SEARCH_GAP_MS", 250)),
+  listings: makeLimiter(envInt("STEAM_MAX_CONCURRENT", 2), REQUEST_GAP_MS),
+  search: makeLimiter(envInt("STEAM_SEARCH_CONCURRENT", 2), envInt("STEAM_SEARCH_GAP_MS", 300)),
   overview: makeLimiter(
     envInt("STEAM_OVERVIEW_CONCURRENT", 2),
-    envInt("STEAM_OVERVIEW_GAP_MS", 250),
+    envInt("STEAM_OVERVIEW_GAP_MS", 300),
   ),
 });
 
@@ -760,7 +770,7 @@ export async function getSteamQuote(rawName: string, opts: QuoteOptions = {}): P
 
   // Recently failed and we have something to show: don't retry yet.
   if (entry?.failedAt && now - entry.failedAt < ERROR_TTL_MS && !opts.force) {
-    return { ...toQuote(entry, true, true), status: "rate_limited" };
+    return degraded(entry);
   }
 
   try {
@@ -768,9 +778,29 @@ export async function getSteamQuote(rawName: string, opts: QuoteOptions = {}): P
     return toQuote(fresh, false);
   } catch (err) {
     const status: SteamQuoteStatus = err instanceof RateLimited ? "rate_limited" : "error";
-    if (entry) return { ...toQuote(entry, true, true), status };
+    if (entry) return degraded(entry, status);
     return { priceEur: null, status, cached: false };
   }
+}
+
+/**
+ * What to answer when Steam refuses but we still know a price.
+ *
+ * THE RULE: a rate limit must never cost the user a price they already had.
+ * The value is returned marked `stale`, and — this is the part that matters
+ * on screen — with status "ok" rather than "rate_limited" whenever there is
+ * a real price in it. A warning toast reading "rate limited" next to a
+ * perfectly good number describes our plumbing, not their portfolio; the
+ * status stays honest only when there is genuinely nothing to show.
+ */
+function degraded(
+  entry: CacheEntry,
+  fallbackStatus: SteamQuoteStatus = "rate_limited",
+): SteamQuote {
+  const quote = toQuote(entry, true, true);
+  return entry.priceEur !== null
+    ? { ...quote, status: "ok" }
+    : { ...quote, status: fallbackStatus };
 }
 
 /** Exposed for the route's diagnostics header. */

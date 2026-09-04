@@ -131,8 +131,24 @@ test("a later failure never erases a count we already knew", async () => {
   const quote = await getSteamQuote(NAME, { withCount: true, force: true });
 
   assert.equal(quote.listingCount, 1229, "keeps the last known good count");
-  assert.equal(quote.status, "rate_limited");
+  assert.equal(quote.priceEur, 38.44, "and the last known good price");
   assert.equal(quote.cached, true);
+  assert.equal(quote.stale, true, "honestly marked as not fresh");
+  // Deliberately NOT "rate_limited": the user is looking at a real price,
+  // and a warning about our request budget describes our plumbing rather
+  // than their portfolio. The status stays honest when there is nothing to
+  // show — see the next test.
+  assert.equal(quote.status, "ok");
+});
+
+test("a 429 with nothing cached still reports rate_limited", async () => {
+  const { getSteamQuote } = await freshModule();
+  stubFetch([["steamcommunity.com", () => json({}, 429)]]);
+
+  const quote = await getSteamQuote(NAME, { withCount: true });
+
+  assert.equal(quote.priceEur, null, "nothing to fall back on");
+  assert.equal(quote.status, "rate_limited", "so the status must say why");
 });
 
 test("concurrent lookups of the same name make ONE Steam call", async () => {
@@ -353,4 +369,42 @@ test("asking for a count still uses the one-request render path", async () => {
 
   assert.equal(quote.listingCount, 1229);
   assert.equal(calls.length, 1, "count + price still cost exactly one call");
+});
+
+test("a cached price is served without touching Steam at all", async () => {
+  const { getSteamQuote } = await freshModule();
+  const calls = stubFetch([["/priceoverview/", overviewOk]]);
+
+  await getSteamQuote(NAME, { withCount: false });
+  const second = await getSteamQuote(NAME, { withCount: false });
+
+  assert.equal(second.priceEur, 12.34);
+  assert.equal(second.cached, true);
+  assert.equal(calls.length, 1, "one Steam request for two lookups");
+});
+
+test("consecutive Steam calls are paced, not fired back-to-back", async () => {
+  const { getSteamQuote } = await freshModule();
+  const stamps = [];
+  globalThis.fetch = async () => {
+    stamps.push(Date.now());
+    return json({ success: true, lowest_price: "9,99€" });
+  };
+
+  // Three different skins at once, the way a portfolio refresh asks.
+  await Promise.all(
+    [
+      "AK-47 | Redline (Field-Tested)",
+      "AWP | Asiimov (Well-Worn)",
+      "M4A4 | Howl (Factory New)",
+    ].map((name) => getSteamQuote(name, { withCount: false })),
+  );
+
+  assert.equal(stamps.length, 3);
+  // Two at a time are allowed through, so the pacing shows up as the spread
+  // between the first and the last rather than as a gap on every pair.
+  assert.ok(
+    stamps[stamps.length - 1] - stamps[0] >= 250,
+    `three lookups must not leave together (spread was ${stamps[stamps.length - 1] - stamps[0]}ms)`,
+  );
 });
