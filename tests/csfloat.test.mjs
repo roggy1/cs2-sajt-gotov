@@ -283,3 +283,53 @@ test("a long queue answers from cache rather than holding the request open", asy
   await Promise.all(flood);
   assert.ok(served > 1, "the queued lookups still ran");
 });
+
+/* -------------------------------------------------------------------------
+ * Listing count
+ *
+ * Counting used to mean walking up to eight pages, which turned one item
+ * page (five wears) into forty upstream calls and was the single biggest
+ * source of 429s. The count now has to come out of the response the price
+ * already came from.
+ * ---------------------------------------------------------------------- */
+
+test("the listing count costs no extra requests", async () => {
+  const calls = stubFetch({
+    data: [listing("a", 1000, 0.2), listing("b", 1500, 0.3)],
+    total: 137,
+  });
+
+  const { body } = await get(`name=${encodeURIComponent(NAME)}&withCount=1`);
+
+  assert.equal(calls.length, 1, "the count must ride along on the price request");
+  assert.equal(body.listingCount, 137, "reported total, not the page size");
+  assert.equal(body.priceCents, 1000);
+});
+
+test("a short page is counted exactly, without a total", async () => {
+  stubFetch([listing("a", 1000, 0.2), listing("b", 1500, 0.3)]);
+
+  const { body } = await get(`name=${encodeURIComponent(NAME)}&withCount=1`);
+
+  assert.equal(body.listingCount, 2, "fewer rows than the page limit proves there is no page 2");
+});
+
+test("a full page with no total reports no count at all", async () => {
+  // 50 rows is the query limit: there may well be a page 2, so any number
+  // we could give is a floor, and a floor shown as a count is wrong.
+  const full = Array.from({ length: 50 }, (_, i) => listing(`l${i}`, 1000 + i, 0.2));
+  stubFetch({ data: full });
+
+  const { body } = await get(`name=${encodeURIComponent(NAME)}&withCount=1`);
+
+  assert.equal(body.listingCount, undefined, "no count is better than a wrong one");
+  assert.equal(body.priceCents, 1000, "the price is still answered");
+});
+
+test("no count is asked for, none is reported", async () => {
+  stubFetch({ data: [listing("a", 1000, 0.2)], total: 9 });
+
+  const { body } = await get(`name=${encodeURIComponent(NAME)}`);
+
+  assert.equal(body.listingCount, undefined);
+});

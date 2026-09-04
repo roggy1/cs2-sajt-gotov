@@ -181,36 +181,49 @@ function ItemContent() {
 
     for (const option of stickerVariants) {
       void (async () => {
-        const priced = await Promise.all(
-          fastMarkets.map(async (market) => {
-            const { priceEur } = await fetchFor(
-              { name: option.marketHashName ?? option.name },
-              market.id,
+        // Every row commits exactly once, whatever happens in between.
+        // A row that never commits stays a skeleton forever, which is how
+        // a single unexpected throw used to leave the table spinning; the
+        // fallback row renders as "n/a", which is at least the truth.
+        let row: VariantQuote = { id: option.id };
+        try {
+          const priced = await Promise.all(
+            fastMarkets.map(async (market) => {
+              const { priceEur } = await fetchFor(
+                { name: option.marketHashName ?? option.name },
+                market.id,
+              );
+              if (priceEur === null) return null;
+              const breakdown = feeBreakdown(priceEur, market.id, {
+                sellerFeePercent: steamTaxPercent,
+                sellerFeeMarket: "steam",
+              });
+              return {
+                market: market.id,
+                net: mode === "selling" ? breakdown.net : breakdown.gross,
+              };
+            }),
+          );
+
+          const best = priced
+            .filter((p): p is { market: MarketplaceId; net: number } => p !== null)
+            .sort((a, b) => (mode === "selling" ? b.net - a.net : a.net - b.net))[0];
+
+          row = { id: option.id, bestNet: best?.net, bestMarket: best?.market };
+        } catch (err) {
+          console.warn("[item] variant quote failed:", err);
+        } finally {
+          if (!cancelled) {
+            setVariantState((prev) =>
+              prev.key !== variantKey
+                ? prev
+                : {
+                    key: prev.key,
+                    quotes: [...prev.quotes.filter((q) => q.id !== option.id), row],
+                  },
             );
-            if (priceEur === null) return null;
-            const breakdown = feeBreakdown(priceEur, market.id, {
-              sellerFeePercent: steamTaxPercent,
-              sellerFeeMarket: "steam",
-            });
-            return {
-              market: market.id,
-              net: mode === "selling" ? breakdown.net : breakdown.gross,
-            };
-          }),
-        );
-
-        if (cancelled) return;
-
-        const best = priced
-          .filter((p): p is { market: MarketplaceId; net: number } => p !== null)
-          .sort((a, b) => (mode === "selling" ? b.net - a.net : a.net - b.net))[0];
-
-        const row: VariantQuote = { id: option.id, bestNet: best?.net, bestMarket: best?.market };
-        setVariantState((prev) =>
-          prev.key !== variantKey
-            ? prev
-            : { key: prev.key, quotes: [...prev.quotes.filter((q) => q.id !== option.id), row] },
-        );
+          }
+        }
       })();
     }
 
@@ -259,30 +272,35 @@ function ItemContent() {
 
     for (const market of INSPECT_MARKETS) {
       void (async () => {
-        const result = await fetchFor(
-          { name: marketHashName, phase: item.phase, paintIndex: item.paintIndex },
-          market.id,
-          false,
-          true, // withCount — the item page shows per-market listing totals
-        );
-        if (cancelled) return;
-        setQuoteState((prev) =>
-          // A late reply for a wear the user already navigated away from is
-          // dropped, not merged.
-          prev.key !== quoteKey
-            ? prev
-            : {
-                key: prev.key,
-                byMarket: {
-                  ...prev.byMarket,
-                  [market.id]: {
-                    market: market.id,
-                    lowestSell: result.priceEur ?? undefined,
-                    listingCount: result.listingCount,
-                  },
-                },
-              },
-        );
+        // Same contract as the tables below: this row leaves the loading
+        // state no matter what, even if the lookup throws outright.
+        let row: MarketQuote = { market: market.id };
+        try {
+          const result = await fetchFor(
+            { name: marketHashName, phase: item.phase, paintIndex: item.paintIndex },
+            market.id,
+            false,
+            true, // withCount — the item page shows per-market depth
+          );
+          row = {
+            market: market.id,
+            lowestSell: result.priceEur ?? undefined,
+            listingCount: result.listingCount,
+            volume24h: result.volume24h,
+          };
+        } catch (err) {
+          console.warn(`[item] ${market.id} quote failed:`, err);
+        } finally {
+          if (!cancelled) {
+            setQuoteState((prev) =>
+              // A late reply for a wear the user already navigated away
+              // from is dropped, not merged.
+              prev.key !== quoteKey
+                ? prev
+                : { key: prev.key, byMarket: { ...prev.byMarket, [market.id]: row } },
+            );
+          }
+        }
       })();
     }
 
@@ -306,39 +324,43 @@ function ItemContent() {
     for (const w of availableWears) {
       void (async () => {
         const name = buildMarketHashName(item, variant, w);
+        let row: WearQuote = { wear: w };
+        try {
+          const priced = await Promise.all(
+            fastMarkets.map(async (market) => {
+              const { priceEur } = await fetchFor(
+                { name, phase: item.phase, paintIndex: item.paintIndex },
+                market.id,
+              );
+              if (priceEur === null) return null;
+              const breakdown = feeBreakdown(priceEur, market.id, {
+                sellerFeePercent: steamTaxPercent,
+                sellerFeeMarket: "steam",
+              });
+              // Buyers rank on what they pay, sellers on what they receive.
+              return {
+                market: market.id,
+                net: mode === "selling" ? breakdown.net : breakdown.gross,
+              };
+            }),
+          );
 
-        const priced = await Promise.all(
-          fastMarkets.map(async (market) => {
-            const { priceEur } = await fetchFor(
-              { name, phase: item.phase, paintIndex: item.paintIndex },
-              market.id,
+          const best = priced
+            .filter((p): p is { market: MarketplaceId; net: number } => p !== null)
+            .sort((a, b) => (mode === "selling" ? b.net - a.net : a.net - b.net))[0];
+
+          row = { wear: w, bestNet: best?.net, bestMarket: best?.market };
+        } catch (err) {
+          console.warn("[item] wear quote failed:", err);
+        } finally {
+          if (!cancelled) {
+            setWearState((prev) =>
+              prev.key !== wearKey
+                ? prev
+                : { key: prev.key, quotes: [...prev.quotes.filter((q) => q.wear !== w), row] },
             );
-            if (priceEur === null) return null;
-            const breakdown = feeBreakdown(priceEur, market.id, {
-              sellerFeePercent: steamTaxPercent,
-              sellerFeeMarket: "steam",
-            });
-            // Buyers rank on what they pay, sellers on what they receive.
-            return {
-              market: market.id,
-              net: mode === "selling" ? breakdown.net : breakdown.gross,
-            };
-          }),
-        );
-
-        if (cancelled) return;
-
-        const best = priced
-          .filter((p): p is { market: MarketplaceId; net: number } => p !== null)
-          .sort((a, b) => (mode === "selling" ? b.net - a.net : a.net - b.net))[0];
-
-        const row: WearQuote = { wear: w, bestNet: best?.net, bestMarket: best?.market };
-
-        setWearState((prev) =>
-          prev.key !== wearKey
-            ? prev
-            : { key: prev.key, quotes: [...prev.quotes.filter((q) => q.wear !== w), row] },
-        );
+          }
+        }
       })();
     }
 

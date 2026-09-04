@@ -6,6 +6,17 @@ export interface CachedQuote {
   listingCount?: number;
   listingCountIsPartial?: boolean;
   volume24h?: number;
+  /**
+   * This entry was written by a request that ASKED for market depth.
+   *
+   * Not the same as having a count: some markets legitimately answer "no
+   * count available" (Steam when its listings endpoint is throttled, CSFloat
+   * when the first page comes back full). Keying the cache on the presence
+   * of a number instead of the presence of an answer meant those items were
+   * re-fetched on every single render of the item page — which is exactly
+   * the burst that got CSFloat to reply 429.
+   */
+  depthChecked?: boolean;
   exactFloatMatch?: boolean;
   fetchedAt: number;
 }

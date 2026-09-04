@@ -1,4 +1,4 @@
-import { Crown, Wallet, Gamepad2, ArrowUpRight, Tag } from "lucide-react";
+import { Crown, Wallet, Gamepad2, ArrowUpRight, ArrowLeftRight, Tag } from "lucide-react";
 import { MarketLogo } from "@/components/MarketLogo";
 import { useI18n } from "@/lib/i18n";
 import { useMoney } from "@/lib/skins";
@@ -17,6 +17,10 @@ export interface MarketQuote {
   market: MarketplaceId;
   lowestSell?: number | undefined;
   listingCount?: number | undefined;
+  /** Units sold in the last 24h. Steam reports this instead of a live
+   *  listing count, so a row falls back to it rather than showing `n/a`
+   *  for a market that is demonstrably liquid. */
+  volume24h?: number | undefined;
   /** This market hasn't answered yet for the current selection. A row in
    *  this state renders as a skeleton — never as `n/a`, and never carrying
    *  the previous wear's number. */
@@ -232,10 +236,23 @@ export function CashoutPanel({
                 ) : quote.listingCount !== undefined ? (
                   <span className="inline-flex items-center gap-1.5 text-muted-foreground">
                     <Tag className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                    <span className="text-sm font-semibold font-mono tabular-nums">
+                    <span className="font-mono text-sm font-semibold tabular-nums">
                       {quote.listingCount.toLocaleString()}
                     </span>
                     <span className="text-xs">{t("listingsLabel")}</span>
+                  </span>
+                ) : quote.volume24h !== undefined ? (
+                  // Steam publishes turnover, not depth. Labelled as such
+                  // so the figure is never mistaken for a listing count.
+                  <span
+                    className="inline-flex items-center gap-1.5 text-muted-foreground"
+                    title={t("soldLast24hHint")}
+                  >
+                    <ArrowLeftRight className="h-3.5 w-3.5 shrink-0 opacity-60" />
+                    <span className="font-mono text-sm font-semibold tabular-nums">
+                      {quote.volume24h.toLocaleString()}
+                    </span>
+                    <span className="text-xs">{t("soldLast24hLabel")}</span>
                   </span>
                 ) : (
                   <span

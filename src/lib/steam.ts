@@ -89,7 +89,15 @@ export function useSteamPrice() {
       // The listing count now rides along on the SAME Steam request as the
       // price (the listings render endpoint returns `total_count` next to
       // the listings), so asking for it no longer costs a second call.
-      if (withCount) params.set("withCount", "1");
+      if (withCount) {
+        params.set("withCount", "1");
+        // Ask for turnover alongside depth. Steam's listing count comes
+        // from the one endpoint that refuses a shared cloud IP first, so
+        // without this the item page showed `n/a` for Steam whenever that
+        // call was throttled — even though the tolerant endpoint had just
+        // answered with a price and a 24h volume sitting right next to it.
+        params.set("withVolume", "1");
+      }
 
       const res = await fetch(`/api/steam-price?${params.toString()}`);
       const body = (await res.json()) as SteamPriceResponse;

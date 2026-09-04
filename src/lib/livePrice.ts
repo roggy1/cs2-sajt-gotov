@@ -20,6 +20,49 @@ export interface LivePriceOutcome {
   volume24h?: number | undefined;
 }
 
+/* -------------------------------------------------------------------------
+ * Client-side pacing
+ *
+ * The Inspect page asks for one price per market for the selected wear AND
+ * one per wear for the wear table. That is six CSFloat lookups leaving the
+ * browser in the same millisecond — measured at gaps of 0-5ms — and CSFloat
+ * answers a burst like that from a shared cloud IP with 429.
+ *
+ * The server paces its own outbound calls, but it can only pace what has
+ * already arrived: six parallel requests still occupy six serverless
+ * invocations, each with its own in-memory throttle. So the queue has to
+ * start here, in the one place every caller goes through.
+ *
+ * Only markets with a configured gap are queued; the others stay parallel,
+ * because serialising Skinport (one cached catalogue lookup) would slow the
+ * page down for no benefit.
+ * ---------------------------------------------------------------------- */
+const MARKET_GAP_MS: Partial<Record<MarketplaceId, number>> = {
+  // CSFloat is the one that actually refuses. 400ms keeps five wears inside
+  // two seconds while looking nothing like a burst.
+  csfloat: 400,
+};
+
+const marketQueues = new Map<MarketplaceId, Promise<unknown>>();
+
+function paced<T>(market: MarketplaceId, task: () => Promise<T>): Promise<T> {
+  const gap = MARKET_GAP_MS[market];
+  if (!gap) return task();
+
+  const previous = marketQueues.get(market) ?? Promise.resolve();
+  // `.catch` on the CHAIN, not on the task: one failed lookup must not
+  // break the queue for everything behind it.
+  const next = previous
+    .catch(() => undefined)
+    .then(async () => {
+      const result = await task();
+      await new Promise((resolve) => setTimeout(resolve, gap));
+      return result;
+    });
+  marketQueues.set(market, next);
+  return next;
+}
+
 type PriceableSkin = Pick<
   Skin,
   "name" | "wear" | "souvenir" | "paintIndex" | "phase" | "floatValue"
@@ -85,7 +128,7 @@ export function useLivePriceFetcher() {
         invalidateQuote(hashName, marketplace, cacheExtra);
       } else {
         const hit = await readQuoteCache(hashName, marketplace, cacheExtra);
-        if (hit && !(withCount && hit.listingCount === undefined)) {
+        if (hit && !(withCount && !hit.depthChecked)) {
           return {
             priceEur: hit.priceEur,
             status: hit.priceEur === null ? "no_listings" : "ok",
@@ -101,15 +144,17 @@ export function useLivePriceFetcher() {
         let outcome: LivePriceOutcome;
 
         if (marketplace === "csfloat") {
-          const result = await cf.mutateAsync({
-            name: skin.name,
-            wear: skin.wear,
-            souvenir: skin.souvenir,
-            paintIndex: skin.paintIndex,
-            phase: skin.phase,
-            floatValue: skin.floatValue,
-            withCount,
-          });
+          const result = await paced(marketplace, () =>
+            cf.mutateAsync({
+              name: skin.name,
+              wear: skin.wear,
+              souvenir: skin.souvenir,
+              paintIndex: skin.paintIndex,
+              phase: skin.phase,
+              floatValue: skin.floatValue,
+              withCount,
+            }),
+          );
           outcome = {
             priceEur: result.priceEur,
             status: result.priceEur === null ? "no_listings" : "ok",
@@ -178,6 +223,7 @@ export function useLivePriceFetcher() {
               priceEur: outcome.priceEur,
               listingCount: outcome.listingCount,
               volume24h: outcome.volume24h,
+              depthChecked: withCount,
               exactFloatMatch: outcome.exactFloatMatch,
             },
             cacheExtra,

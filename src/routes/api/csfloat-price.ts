@@ -59,10 +59,6 @@ const MAX_QUEUE_WAIT_MS = 4_000;
 // reported listing count, so the two must never drift apart.
 const LISTING_QUERY_LIMIT = 50;
 
-// Counting means walking pages. Cap the walk so one popular item can't
-// fire dozens of requests; past the cap we report nothing rather than a
-// number we know is short.
-const MAX_COUNT_PAGES = 8; // up to 400 listings
 type CacheEntry = {
   priceCents: number | null;
   exactFloatMatch: boolean;
@@ -171,6 +167,21 @@ interface CsfloatListing {
 
 /** Pulls paint_index out of a listing regardless of which shape the API
  * returns it in — nested under `item` or flat at the top level. */
+/**
+ * The listings endpoint answers with a bare array on some deployments and
+ * an envelope on others, and the envelope has carried the depth figure
+ * under three different names. Both shapes are declared here so the count
+ * can be read without a cast at the call site.
+ */
+type CsfloatListingsBody =
+  | CsfloatListing[]
+  | {
+      data?: CsfloatListing[];
+      total?: number;
+      total_count?: number;
+      count?: number;
+    };
+
 function listingPaintIndex(l: CsfloatListing): string | undefined {
   const raw = l.item?.paint_index ?? l.paint_index;
   return raw === undefined || raw === null ? undefined : String(raw);
@@ -275,7 +286,7 @@ async function queryListings(
   minFloat?: number,
   maxFloat?: number,
   limit = LISTING_QUERY_LIMIT,
-): Promise<CsfloatListing[]> {
+): Promise<{ listings: CsfloatListing[]; total?: number | undefined }> {
   const params = new URLSearchParams({
     market_hash_name: marketHashName,
     // Only fixed-price listings — auctions' current bid is not a real price
@@ -296,65 +307,53 @@ async function queryListings(
   });
   if (!res.ok) throw new CsfloatRejected(res.status);
 
-  const body = (await res.json()) as CsfloatListing[] | { data?: CsfloatListing[] };
-  return Array.isArray(body) ? body : (body.data ?? []);
+  const body = (await res.json()) as CsfloatListingsBody;
+  if (Array.isArray(body)) return { listings: body };
+
+  const total = readTotal(body);
+  return {
+    listings: body.data ?? [],
+    ...(total !== undefined ? { total } : {}),
+  };
 }
 
 /**
- * Walks pages until one comes back short, meaning every listing has been
- * seen. Returns undefined if the cap is hit first — an approximate count
- * presented as exact is worse than no count at all.
+ * The depth figure, whatever CSFloat decided to call it this month.
+ *
+ * The listings endpoint has shipped the total under several names over
+ * time (and sometimes not at all), so every known spelling is read and the
+ * first sane number wins. Anything non-numeric or negative is ignored
+ * rather than surfaced as a count.
  */
-async function countListings(
-  apiKey: string | undefined,
-  marketHashName: string,
-  paintIndex?: string,
-  phase?: string,
-): Promise<number | undefined> {
-  // De-duplicated by listing id: if the API ignores `page` and keeps
-  // returning the same rows, the set simply stops growing and we bail out
-  // with an accurate figure instead of multiplying one page by the page
-  // count. A failed page returns what we already counted rather than
-  // nothing, so a hiccup on page 3 doesn't wipe out pages 1 and 2.
-  const seen = new Set<string>();
-
-  for (let page = 0; page < MAX_COUNT_PAGES; page++) {
-    const params = new URLSearchParams({
-      market_hash_name: marketHashName,
-      type: "buy_now",
-      sort_by: "lowest_price",
-      limit: String(LISTING_QUERY_LIMIT),
-    });
-    if (page > 0) params.set("page", String(page));
-    if (paintIndex) params.set("paint_index", paintIndex);
-
-    let listings: CsfloatListing[];
-    try {
-      const res = await fetch(`${CSFLOAT_LISTINGS_URL}?${params.toString()}`, {
-        headers: csfloatHeaders(apiKey),
-        signal: AbortSignal.timeout(12_000),
-      });
-      if (!res.ok) {
-        console.warn(`[csfloat] count page ${page} returned ${res.status}`);
-        return seen.size > 0 ? seen.size : undefined;
-      }
-      const body = (await res.json()) as CsfloatListing[] | { data?: CsfloatListing[] };
-      listings = Array.isArray(body) ? body : (body.data ?? []);
-    } catch (err) {
-      console.warn(`[csfloat] count page ${page} threw:`, err);
-      return seen.size > 0 ? seen.size : undefined;
-    }
-
-    const before = seen.size;
-    for (const listing of verifiedListings(listings, paintIndex, phase)) {
-      if (listing.id) seen.add(listing.id);
-    }
-
-    // Nothing new, or a short page — either way we've seen everything.
-    if (seen.size === before || listings.length < LISTING_QUERY_LIMIT) break;
+function readTotal(body: Exclude<CsfloatListingsBody, CsfloatListing[]>): number | undefined {
+  for (const value of [body.total, body.total_count, body.count]) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
   }
+  return undefined;
+}
 
-  return seen.size;
+/**
+ * How many listings are on offer, WITHOUT spending extra requests.
+ *
+ * This used to walk up to eight pages. That was the single biggest source
+ * of CSFloat 429s: one item page asked for five wears, and each of those
+ * quietly became up to eight upstream calls. The count is now read from
+ * the same response the price came from:
+ *
+ *   1. the `total` (or `total_count`/`count`) field, when CSFloat sends
+ *      one — that is the exact depth of the order book;
+ *   2. otherwise the rows we already have, but only when the page came
+ *      back SHORT, which proves there is no second page;
+ *   3. otherwise nothing. An item with a full first page has "at least 50"
+ *      listings, and a floor presented as a count is a wrong number.
+ */
+function deriveListingCount(
+  matches: CsfloatListing[],
+  pageSize: number,
+  reportedTotal: number | undefined,
+): number | undefined {
+  if (reportedTotal !== undefined) return reportedTotal;
+  return pageSize < LISTING_QUERY_LIMIT ? matches.length : undefined;
 }
 
 /**
@@ -412,7 +411,7 @@ async function fetchFresh(params: LookupParams): Promise<CacheEntry> {
      * nobody is selling in, and made a perfectly liquid skin report "no
      * matching listing for this float".
      */
-    const listings = await queryListings(apiKey, marketHashName, paintIndex);
+    const { listings, total } = await queryListings(apiKey, marketHashName, paintIndex);
 
     /**
      * Phase IS still verified, which is a different thing from float:
@@ -442,9 +441,9 @@ async function fetchFresh(params: LookupParams): Promise<CacheEntry> {
         return typeof f === "number" && Math.abs(f - floatValue) <= FLOAT_TOLERANCE;
       });
 
-    // Counted only when asked for — it costs extra requests.
+    // Free: read off the response we already have, no extra requests.
     const listingCount = wantsCount
-      ? await countListings(apiKey, marketHashName, paintIndex, phase)
+      ? deriveListingCount(matches, listings.length, total)
       : undefined;
 
     const entry: CacheEntry = { priceCents, exactFloatMatch, fetchedAt: Date.now() };
