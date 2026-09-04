@@ -1,0 +1,274 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+/*
+ * CS2 Skin Tracker design system — dark-only, three themes:
+ * .theme-go (default, gray + orange), .theme-ct (navy + blue), .theme-t (near black + muted orange)
+ * Profit is always --profit (green), loss always --loss (red) in every theme.
+ */
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-profit: var(--profit);
+  --color-loss: var(--loss);
+  --color-surface: var(--surface);
+  /* One UI face for everything that is words, one for everything that is
+     a figure. `--font-display` stays a separate token because headings
+     want the tighter tracking set in the base layer, but it is the same
+     family as the body text now — the brand's character comes from the
+     shimmer and the glow, not from a second typeface. */
+  --font-display: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-sans: "Plus Jakarta Sans", system-ui, sans-serif;
+  --font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root,
+.theme-go {
+  --radius: 0.5rem;
+  --background: oklch(0.19 0.006 260);
+  --foreground: oklch(0.96 0.004 260);
+  --surface: oklch(0.235 0.007 260);
+  --card: oklch(0.235 0.007 260);
+  --card-foreground: oklch(0.96 0.004 260);
+  --popover: oklch(0.22 0.007 260);
+  --popover-foreground: oklch(0.96 0.004 260);
+  --primary: oklch(0.72 0.17 55);
+  --primary-foreground: oklch(0.16 0.01 60);
+  --secondary: oklch(0.3 0.008 260);
+  --secondary-foreground: oklch(0.95 0.004 260);
+  --muted: oklch(0.28 0.008 260);
+  --muted-foreground: oklch(0.7 0.012 260);
+  --accent: oklch(0.72 0.17 55);
+  --accent-foreground: oklch(0.16 0.01 60);
+  --destructive: oklch(0.6 0.22 25);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.32 0.008 260);
+  --input: oklch(0.32 0.008 260);
+  --ring: oklch(0.72 0.17 55);
+  --profit: oklch(0.75 0.19 148);
+  --loss: oklch(0.66 0.22 22);
+  --glow: color-mix(in oklab, var(--primary) 35%, transparent);
+}
+
+.theme-ct {
+  --background: oklch(0.21 0.045 255);
+  --foreground: oklch(0.96 0.01 250);
+  --surface: oklch(0.27 0.055 255);
+  --card: oklch(0.27 0.055 255);
+  --card-foreground: oklch(0.96 0.01 250);
+  --popover: oklch(0.25 0.05 255);
+  --popover-foreground: oklch(0.96 0.01 250);
+  --primary: oklch(0.7 0.14 240);
+  --primary-foreground: oklch(0.15 0.03 255);
+  --secondary: oklch(0.33 0.05 255);
+  --secondary-foreground: oklch(0.96 0.01 250);
+  --muted: oklch(0.32 0.045 255);
+  --muted-foreground: oklch(0.75 0.03 250);
+  --accent: oklch(0.7 0.14 240);
+  --accent-foreground: oklch(0.15 0.03 255);
+  --border: oklch(0.37 0.05 255);
+  --input: oklch(0.37 0.05 255);
+  --ring: oklch(0.7 0.14 240);
+  --glow: color-mix(in oklab, var(--primary) 35%, transparent);
+}
+
+.theme-t {
+  --background: oklch(0.12 0.004 60);
+  --foreground: oklch(0.93 0.006 70);
+  --surface: oklch(0.16 0.006 60);
+  --card: oklch(0.16 0.006 60);
+  --card-foreground: oklch(0.93 0.006 70);
+  --popover: oklch(0.15 0.006 60);
+  --popover-foreground: oklch(0.93 0.006 70);
+  --primary: oklch(0.63 0.1 58);
+  --primary-foreground: oklch(0.12 0.005 60);
+  --secondary: oklch(0.22 0.008 60);
+  --secondary-foreground: oklch(0.93 0.006 70);
+  --muted: oklch(0.2 0.008 60);
+  --muted-foreground: oklch(0.66 0.012 60);
+  --accent: oklch(0.63 0.1 58);
+  --accent-foreground: oklch(0.12 0.005 60);
+  --border: oklch(0.26 0.01 60);
+  --input: oklch(0.26 0.01 60);
+  --ring: oklch(0.63 0.1 58);
+  --glow: color-mix(in oklab, var(--primary) 25%, transparent);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    background-image:
+      radial-gradient(60rem 40rem at 85% -10%, var(--glow), transparent 70%),
+      radial-gradient(50rem 30rem at 0% 0%, color-mix(in oklab, var(--primary) 12%, transparent), transparent 70%);
+    background-attachment: fixed;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    letter-spacing: 0.01em;
+  }
+}
+
+@utility panel {
+  background: color-mix(in oklab, var(--surface) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 18px 40px -24px oklch(0 0 0 / 0.85);
+  backdrop-filter: blur(6px);
+  transition:
+    box-shadow 260ms ease,
+    border-color 260ms ease,
+    transform 260ms ease;
+
+  &:hover {
+    border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+    box-shadow:
+      0 18px 40px -24px oklch(0 0 0 / 0.85),
+      0 0 0 1px color-mix(in oklab, var(--primary) 22%, transparent),
+      0 0 28px -6px color-mix(in oklab, var(--primary) 50%, transparent);
+    transform: translateY(-2px);
+  }
+}
+
+@utility stat-accent {
+  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--primary) 35%, transparent);
+}
+
+@keyframes letter-shimmer {
+  0%,
+  60%,
+  100% {
+    color: var(--foreground);
+    text-shadow: none;
+  }
+  28% {
+    color: var(--primary);
+    text-shadow: 0 0 14px color-mix(in oklab, var(--primary) 55%, transparent);
+  }
+}
+
+@utility shimmer-letter {
+  display: inline-block;
+  animation: letter-shimmer 3.1s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(18px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+/* Expo-out easing: fast to settle, no bounce — reads as "snappy" rather
+   than springy, which suits a status message. */
+@utility toast-enter {
+  animation: toast-in 380ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes toast-icon-pop {
+  from {
+    opacity: 0;
+    transform: rotate(-120deg) scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+  }
+}
+
+@utility toast-icon-enter {
+  animation: toast-icon-pop 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 90ms;
+}
+
+@keyframes toast-accent-sweep {
+  from {
+    transform: scaleY(0);
+    opacity: 0;
+  }
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+/* The thin coloured rail down the left edge draws itself in. */
+@utility toast-accent-enter {
+  transform-origin: top;
+  animation: toast-accent-sweep 460ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 60ms;
+}
+
+@keyframes field-error-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  25%,
+  75% {
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--loss) 35%, transparent);
+  }
+}
+
+/* Two quick pulses, then it settles back to the plain red border. Long
+   enough to catch the eye, short enough not to nag. */
+@utility field-error-flash {
+  animation: field-error-pulse 760ms cubic-bezier(0.16, 1, 0.3, 1) 2;
+}
+
+@keyframes mode-swap-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Re-keyed on every Buying/Selling switch, so the whole list visibly
+   re-settles instead of numbers silently changing in place. */
+@utility mode-swap {
+  animation: mode-swap-in 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@utility icon-glow {
+  filter: drop-shadow(0 0 6px color-mix(in oklab, var(--primary) 55%, transparent));
+}
