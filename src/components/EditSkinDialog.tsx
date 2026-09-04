@@ -201,36 +201,57 @@ export function EditSkinDialog({
             <p className="text-[11px] text-muted-foreground">{t("manualPriceHint")}</p>
           </div>
 
-          {allowSelling && (
-            <div className="space-y-1.5 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.04] p-3 sm:col-span-2">
-              <Label className="flex items-center gap-1.5 text-xs uppercase tracking-wider text-emerald-400">
-                <HandCoins className="h-3.5 w-3.5" />
-                {t("markAsSold")}
-              </Label>
-              <Input
-                type="number"
-                step="any"
-                min="0"
-                value={soldPrice}
-                onChange={(e) => setSoldPrice(e.target.value)}
-                placeholder={t("soldPricePlaceholder")}
-              />
-              {soldPrice.trim() !== "" && Number.isFinite(Number(soldPrice)) && (
-                <p className="text-xs">
-                  <span className="text-muted-foreground">{t("realizedResult")}: </span>
-                  <span
-                    className={cn(
-                      "font-semibold font-mono tabular-nums",
-                      (Number(soldPrice) - buyNum) * qtyNum >= 0 ? "text-profit" : "text-loss",
-                    )}
-                  >
-                    {((Number(soldPrice) - buyNum) * qtyNum).toFixed(2)}
-                  </span>
-                </p>
+          {/* Always rendered, even where it cannot be used.
+              Hiding it in Main made the app look like it had no way to
+              record a sale at all; a disabled field that says why is the
+              honest version of the same rule. */}
+          <div
+            className={cn(
+              "space-y-1.5 rounded-lg border p-3 sm:col-span-2",
+              allowSelling
+                ? "border-emerald-400/25 bg-emerald-400/[0.04]"
+                : "border-border bg-muted/20",
+            )}
+          >
+            <Label
+              className={cn(
+                "flex items-center gap-1.5 text-xs uppercase tracking-wider",
+                allowSelling ? "text-emerald-400" : "text-muted-foreground",
               )}
+            >
+              <HandCoins className="h-3.5 w-3.5" />
+              {t("markAsSold")} — {t("salePriceLabel")}
+            </Label>
+            <Input
+              type="number"
+              step="any"
+              min="0"
+              disabled={!allowSelling}
+              value={soldPrice}
+              onChange={(e) => setSoldPrice(e.target.value)}
+              placeholder={t("soldPricePlaceholder")}
+              className="font-mono tabular-nums"
+            />
+            {!allowSelling && (
+              <p className="text-[11px] leading-snug text-amber-400">{t("sellingInMainHint")}</p>
+            )}
+            {allowSelling && soldPrice.trim() !== "" && Number.isFinite(Number(soldPrice)) && (
+              <p className="text-xs">
+                <span className="text-muted-foreground">{t("realizedResult")}: </span>
+                <span
+                  className={cn(
+                    "font-semibold font-mono tabular-nums",
+                    (Number(soldPrice) - buyNum) * qtyNum >= 0 ? "text-profit" : "text-loss",
+                  )}
+                >
+                  {((Number(soldPrice) - buyNum) * qtyNum).toFixed(2)}
+                </span>
+              </p>
+            )}
+            {allowSelling && (
               <p className="text-[11px] text-muted-foreground">{t("markAsSoldHint")}</p>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
         <DialogFooter>

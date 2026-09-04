@@ -88,7 +88,17 @@ export interface MarketAdapter {
   label: string;
   fees: MarketFeeModel;
   capabilities: MarketCapabilities;
-  /** File in public/market-logos/, without extension. */
+  /**
+   * The logo's FILE NAME in public/market-logos/, extension included
+   * (e.g. "steam.png").
+   *
+   * The extension is part of the value on purpose. The component used to
+   * try `<id>.svg` first and fall back to `<id>.png`, which meant every
+   * market fired a guaranteed 404 for a file that was never shipped —
+   * four red lines in the console on every page load. Naming the real file
+   * asks for exactly what exists; swapping in an SVG is a one-word edit
+   * here.
+   */
   logo: string;
   /**
    * Builds a link straight to this item on the marketplace.

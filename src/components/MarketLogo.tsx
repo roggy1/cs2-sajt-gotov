@@ -6,24 +6,26 @@ import { cn } from "@/lib/utils";
 /**
  * Renders the official brand logo for a marketplace.
  *
- * The file is resolved from the adapter's own `logo` field (falling back to
- * the market id), so the registry stays the single place that decides which
- * asset a market uses:
+ * The file comes from the adapter's own `logo` field, extension included,
+ * so exactly one request is made for a file that is known to exist:
  *
  *   public/market-logos/steam.png
  *   public/market-logos/skinport.png
  *   public/market-logos/csfloat.png
  *   public/market-logos/marketcsgo.png
  *
- * `.svg` is tried first and `.png` is the fallback, so upgrading one brand
- * mark to a vector is a matter of dropping the file in — no code change.
+ * Everything under `public/` is served from the site ROOT, so
+ * `public/market-logos/steam.png` is fetched as `/market-logos/steam.png` —
+ * the `public` segment never appears in the URL. To switch a brand to a
+ * vector, drop `steam.svg` in beside it and change the adapter's `logo` to
+ * "steam.svg"; no component change, no guessing, and no 404 either way.
  *
- * When neither file is installed the component still renders NOTHING that
+ * If the file is genuinely missing the component still renders NOTHING that
  * could be mistaken for a brand mark — inventing a logo for a real company
  * is not something this app should do. It falls back to a plain initial in
  * a muted tile: unmistakably a placeholder, and it keeps the market rows
  * aligned instead of leaving one row's text hanging where every other row
- * has an icon. Drop in the real asset and it disappears on its own.
+ * has an icon.
  */
 export function MarketLogo({
   market,
@@ -31,17 +33,15 @@ export function MarketLogo({
   className,
 }: {
   market: MarketplaceId;
-  /** Used for the placeholder initial when no brand asset is installed. */
+  /** Used for the placeholder initial when the brand asset is missing. */
   label?: string | undefined;
   className?: string;
 }) {
-  const [srcIndex, setSrcIndex] = useState(0);
+  const [failed, setFailed] = useState(false);
 
-  const file = getMarket(market)?.logo ?? market;
-  const sources = [`/market-logos/${file}.svg`, `/market-logos/${file}.png`];
-  const src = sources[srcIndex];
+  const file = getMarket(market)?.logo;
 
-  if (!src) {
+  if (!file || failed) {
     const initial = (label ?? market).trim().charAt(0).toUpperCase();
     return (
       <span
@@ -59,10 +59,10 @@ export function MarketLogo({
 
   return (
     <img
-      src={src}
+      src={`/market-logos/${file}`}
       alt=""
       aria-hidden="true"
-      onError={() => setSrcIndex((i) => i + 1)}
+      onError={() => setFailed(true)}
       className={cn("h-4 w-4 shrink-0 object-contain", className)}
     />
   );

@@ -189,6 +189,8 @@ const dict = {
     stickerFinish: "Finish",
     collectionLabel: "Collection",
     moreContainers: "+{count} more",
+    sellingInMainHint:
+      "Main mirrors your Steam inventory, so a sale recorded here would be wiped by the next import. Move the item to another portfolio to sell it.",
     editSales: "Edit sold items",
     soldItemsTitle: "Sold items",
     soldItemsHint:
@@ -415,6 +417,8 @@ const dict = {
     stickerFinish: "Varijanta",
     collectionLabel: "Kolekcija",
     moreContainers: "+{count} još",
+    sellingInMainHint:
+      "Main prati tvoj Steam inventar, pa bi prodaju upisanu ovde obrisao sledeći import. Premesti predmet u drugi portfolio da bi ga prodao.",
     editSales: "Izmeni prodate predmete",
     soldItemsTitle: "Prodati predmeti",
     soldItemsHint: "Ispravi prodajnu cenu, vrati predmet u inventar ili obriši zapis u potpunosti.",
@@ -641,6 +645,8 @@ const dict = {
     stickerFinish: "Ausführung",
     collectionLabel: "Kollektion",
     moreContainers: "+{count} weitere",
+    sellingInMainHint:
+      "Main spiegelt dein Steam-Inventar, ein hier eingetragener Verkauf würde beim nächsten Import verschwinden. Verschiebe den Gegenstand in ein anderes Portfolio, um ihn zu verkaufen.",
     editSales: "Verkäufe bearbeiten",
     soldItemsTitle: "Verkaufte Gegenstände",
     soldItemsHint:
@@ -868,6 +874,8 @@ const dict = {
     stickerFinish: "Вариант",
     collectionLabel: "Коллекция",
     moreContainers: "+{count} ещё",
+    sellingInMainHint:
+      "Main отражает ваш инвентарь Steam, поэтому записанная здесь продажа исчезнет при следующем импорте. Перенесите предмет в другой портфель, чтобы продать его.",
     editSales: "Изменить продажи",
     soldItemsTitle: "Проданные предметы",
     soldItemsHint:
@@ -1095,6 +1103,8 @@ const dict = {
     volumeNotReported: "Este mercado no informa el volumen de ventas.",
     collectionLabel: "Colección",
     moreContainers: "+{count} más",
+    sellingInMainHint:
+      "Main refleja tu inventario de Steam, así que una venta anotada aquí se perdería en la próxima importación. Mueve el objeto a otra cartera para venderlo.",
     editSales: "Editar ventas",
     soldItemsTitle: "Objetos vendidos",
     soldItemsHint:
@@ -1323,6 +1333,8 @@ const dict = {
     volumeNotReported: "Este mercado não informa o volume de vendas.",
     collectionLabel: "Coleção",
     moreContainers: "+{count} mais",
+    sellingInMainHint:
+      "Main espelha o teu inventário Steam, por isso uma venda registada aqui desapareceria na próxima importação. Move o item para outra carteira para o vender.",
     editSales: "Editar vendas",
     soldItemsTitle: "Itens vendidos",
     soldItemsHint:

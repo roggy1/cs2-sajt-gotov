@@ -75,18 +75,63 @@ function cacheKey(
  * phase's price — worst case we return null more often than ideal.
  */
 /**
- * Auth headers for a CSFloat read.
+ * Headers for every CSFloat read.
  *
- * Reading listings is a PUBLIC endpoint — CSFloat documents `GET
- * /api/v1/listings` as needing no key, and only listing an item for sale
- * requires one. The proxy used to refuse to run at all without
- * `CSFLOAT_API_KEY`, which meant a deployment with no key simply had no
- * CSFloat prices. Now the key is sent when it exists (a key raises the
- * rate ceiling and is what an authenticated deployment should use) and
- * omitted when it doesn't, so the market works out of the box.
+ * Two things matter here, and both were learned the hard way on Vercel.
+ *
+ * 1. AUTHORIZATION. CSFloat documents `GET /api/v1/listings` as public, and
+ *    it is — from a home IP. From a shared cloud IP (Vercel, Netlify,
+ *    Fly...) the anonymous quota is spent by everyone else on that address,
+ *    so the request comes back 403/429 and the route turned that into a
+ *    502. A key makes the request OURS instead of the datacentre's, which
+ *    is why `CSFLOAT_API_KEY` is effectively required in production even
+ *    though the endpoint is nominally open.
+ *
+ * 2. USER-AGENT. Server-side `fetch` sends either nothing or a bare
+ *    runtime string, which is exactly the fingerprint a bot filter drops.
+ *    A real, identifying UA with a contact URL is both the polite thing to
+ *    send and the thing that gets through.
  */
-function authHeaders(apiKey: string | undefined): HeadersInit {
-  return apiKey ? { Authorization: apiKey } : {};
+const USER_AGENT =
+  "CS2SkinTracker/1.0 (+https://github.com/cmigi/cs2-inventory-hub; portfolio price tracker)";
+
+function csfloatHeaders(apiKey: string | undefined): HeadersInit {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    "User-Agent": USER_AGENT,
+  };
+  // CSFloat takes the raw key in Authorization — no "Bearer " prefix.
+  if (apiKey) headers["Authorization"] = apiKey;
+  return headers;
+}
+
+/** Warn once per cold start, not once per holding in the portfolio. */
+let warnedAboutMissingKey = false;
+
+function readApiKey(): string | undefined {
+  // Bracket access because `process.env` is an index signature under this
+  // project's TS settings, and because a bundler that inlines env vars
+  // (Vite/Vercel) rewrites exactly this form.
+  const key = process.env["CSFLOAT_API_KEY"]?.trim();
+  if (!key) {
+    if (!warnedAboutMissingKey) {
+      warnedAboutMissingKey = true;
+      console.warn(
+        "[csfloat] CSFLOAT_API_KEY is not set. Reads still work from an unblocked IP, but a " +
+          "shared cloud IP (Vercel) will usually be refused — set it in the project's " +
+          "environment variables and redeploy.",
+      );
+    }
+    return undefined;
+  }
+  return key;
+}
+
+/** Upstream refused us rather than failed — worth reporting differently. */
+class CsfloatRejected extends Error {
+  constructor(readonly status: number) {
+    super(`CSFloat responded ${status}`);
+  }
 }
 
 async function queryListings(
@@ -110,9 +155,12 @@ async function queryListings(
   if (maxFloat !== undefined) params.set("max_float", maxFloat.toFixed(6));
 
   const res = await fetch(`${CSFLOAT_LISTINGS_URL}?${params.toString()}`, {
-    headers: authHeaders(apiKey),
+    headers: csfloatHeaders(apiKey),
+    // A serverless function is billed by the second and killed at its
+    // timeout; hanging on a silent upstream is the worst of both.
+    signal: AbortSignal.timeout(12_000),
   });
-  if (!res.ok) throw new Error(`CSFloat responded ${res.status}`);
+  if (!res.ok) throw new CsfloatRejected(res.status);
 
   const body = (await res.json()) as CsfloatListing[] | { data?: CsfloatListing[] };
   return Array.isArray(body) ? body : (body.data ?? []);
@@ -149,7 +197,8 @@ async function countListings(
     let listings: CsfloatListing[];
     try {
       const res = await fetch(`${CSFLOAT_LISTINGS_URL}?${params.toString()}`, {
-        headers: authHeaders(apiKey),
+        headers: csfloatHeaders(apiKey),
+        signal: AbortSignal.timeout(12_000),
       });
       if (!res.ok) {
         console.warn(`[csfloat] count page ${page} returned ${res.status}`);
@@ -206,92 +255,144 @@ export const Route = createFileRoute("/api/csfloat-price")({
   server: {
     handlers: {
       GET: async ({ request }) => {
-        const url = new URL(request.url);
-        const marketHashName = url.searchParams.get("name");
-        const floatParam = url.searchParams.get("float");
-        const paintIndex = url.searchParams.get("paintIndex") ?? undefined;
-        const phase = url.searchParams.get("phase") ?? undefined;
-
-        if (!marketHashName) {
-          return Response.json({ error: "Missing 'name' query parameter" }, { status: 400 });
-        }
-
-        const floatValue = floatParam !== null ? Number(floatParam) : undefined;
-        const hasFloat = floatValue !== undefined && Number.isFinite(floatValue);
-
-        const key = cacheKey(marketHashName, paintIndex, phase, hasFloat ? floatValue : undefined);
-        const cached = cache.get(key);
-        const wantsCount = url.searchParams.get("withCount") === "1";
-        // A cached entry only counts as a hit if it carries everything this
-        // request needs. Without this check, the inventory table (which
-        // never asks for counts) poisons the cache and the item page shows
-        // n/a for the next ten minutes.
-        const cacheSatisfies = cached && !(wantsCount && cached.listingCount === undefined);
-
-        if (cached && cacheSatisfies && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-          return Response.json({
-            priceCents: cached.priceCents,
-            exactFloatMatch: cached.exactFloatMatch,
-            listingCount: cached.listingCount,
-            cached: true,
-          });
-        }
-
-        // Optional: see `authHeaders`. Reading prices works without it.
-        const apiKey = process.env["CSFLOAT_API_KEY"];
-
+        // Outer guard: whatever happens below, this route answers with a
+        // price-shaped body. An uncaught throw here is a 500/502 on Vercel,
+        // and the client turns that into a failed refresh for the WHOLE
+        // portfolio rather than one missing cell.
+        let marketHashName: string | null = null;
         try {
-          let matches: CsfloatListing[] = [];
-          let exactFloatMatch = false;
+          const url = new URL(request.url);
+          marketHashName = url.searchParams.get("name");
+          const floatParam = url.searchParams.get("float");
+          const paintIndex = url.searchParams.get("paintIndex") ?? undefined;
+          const phase = url.searchParams.get("phase") ?? undefined;
 
-          // Tier 1: exact float condition (verified phase, if we have one).
-          if (hasFloat) {
-            const minFloat = Math.max(0, floatValue! - FLOAT_TOLERANCE);
-            const maxFloat = Math.min(1, floatValue! + FLOAT_TOLERANCE);
-            const listings = await queryListings(
-              apiKey,
-              marketHashName,
-              paintIndex,
-              minFloat,
-              maxFloat,
-            );
-            matches = verifiedListings(listings, paintIndex, phase);
-            exactFloatMatch = matches.length > 0;
+          if (!marketHashName) {
+            return Response.json({ error: "Missing 'name' query parameter" }, { status: 400 });
           }
 
-          // Tier 2: no listings verified at that exact float — widen to any
-          // float, still verifying phase before accepting a price.
-          if (matches.length === 0) {
-            const listings = await queryListings(apiKey, marketHashName, paintIndex);
-            matches = verifiedListings(listings, paintIndex, phase);
-            exactFloatMatch = false;
-          }
+          const floatValue = floatParam !== null ? Number(floatParam) : undefined;
+          const hasFloat = floatValue !== undefined && Number.isFinite(floatValue);
 
-          const priceCents = matches[0]?.price ?? null;
+          const key = cacheKey(
+            marketHashName,
+            paintIndex,
+            phase,
+            hasFloat ? floatValue : undefined,
+          );
+          const cached = cache.get(key);
+          const wantsCount = url.searchParams.get("withCount") === "1";
+          // A cached entry only counts as a hit if it carries everything this
+          // request needs. Without this check, the inventory table (which
+          // never asks for counts) poisons the cache and the item page shows
+          // n/a for the next ten minutes.
+          const cacheSatisfies = cached && !(wantsCount && cached.listingCount === undefined);
 
-          // Counted only when asked for — it costs extra requests.
-          const exactCount =
-            url.searchParams.get("withCount") === "1"
-              ? await countListings(apiKey, marketHashName, paintIndex, phase)
-              : undefined;
-          cache.set(key, { priceCents, exactFloatMatch, fetchedAt: Date.now() });
-          return Response.json({
-            priceCents,
-            exactFloatMatch,
-            cached: false,
-            // Exact, or absent. Never a capped stand-in.
-            listingCount: exactCount,
-          });
-        } catch {
-          if (cached) {
+          if (cached && cacheSatisfies && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
             return Response.json({
               priceCents: cached.priceCents,
               exactFloatMatch: cached.exactFloatMatch,
+              listingCount: cached.listingCount,
               cached: true,
-              stale: true,
             });
           }
-          return Response.json({ error: "Failed to reach CSFloat" }, { status: 502 });
+
+          // Set this in the Vercel project's Environment Variables. Without
+          // it a cloud deployment shares an anonymous quota with every other
+          // tenant on the same egress IP — see `csfloatHeaders`.
+          const apiKey = readApiKey();
+
+          try {
+            let matches: CsfloatListing[] = [];
+            let exactFloatMatch = false;
+
+            // Tier 1: exact float condition (verified phase, if we have one).
+            if (hasFloat) {
+              const minFloat = Math.max(0, floatValue! - FLOAT_TOLERANCE);
+              const maxFloat = Math.min(1, floatValue! + FLOAT_TOLERANCE);
+              const listings = await queryListings(
+                apiKey,
+                marketHashName,
+                paintIndex,
+                minFloat,
+                maxFloat,
+              );
+              matches = verifiedListings(listings, paintIndex, phase);
+              exactFloatMatch = matches.length > 0;
+            }
+
+            // Tier 2: no listings verified at that exact float — widen to any
+            // float, still verifying phase before accepting a price.
+            if (matches.length === 0) {
+              const listings = await queryListings(apiKey, marketHashName, paintIndex);
+              matches = verifiedListings(listings, paintIndex, phase);
+              exactFloatMatch = false;
+            }
+
+            const priceCents = matches[0]?.price ?? null;
+
+            // Counted only when asked for — it costs extra requests.
+            const exactCount =
+              url.searchParams.get("withCount") === "1"
+                ? await countListings(apiKey, marketHashName, paintIndex, phase)
+                : undefined;
+            cache.set(key, { priceCents, exactFloatMatch, fetchedAt: Date.now() });
+            return Response.json({
+              priceCents,
+              exactFloatMatch,
+              cached: false,
+              // Exact, or absent. Never a capped stand-in.
+              listingCount: exactCount,
+            });
+          } catch (err) {
+            // A stale price beats no price: the item still exists and its
+            // value has not changed much in ten minutes.
+            if (cached) {
+              return Response.json({
+                priceCents: cached.priceCents,
+                exactFloatMatch: cached.exactFloatMatch,
+                cached: true,
+                stale: true,
+              });
+            }
+
+            const rejected = err instanceof CsfloatRejected ? err.status : null;
+            if (rejected !== null) {
+              console.warn(
+                `[csfloat] upstream ${rejected} for "${marketHashName}"` +
+                  (apiKey
+                    ? ""
+                    : " — no CSFLOAT_API_KEY set, which is required on shared cloud IPs"),
+              );
+            } else {
+              console.warn(`[csfloat] lookup failed for "${marketHashName}":`, err);
+            }
+
+            // 200 with an explicit status, NOT 502. The client's job here is
+            // to show "no price right now" on one row; a 5xx makes the whole
+            // request look broken, fills the browser console with red, and
+            // (on Vercel) is indistinguishable from the function crashing.
+            return Response.json({
+              priceCents: null,
+              exactFloatMatch: false,
+              cached: false,
+              status:
+                rejected === 401 || rejected === 403
+                  ? "unauthorized"
+                  : rejected === 429
+                    ? "rate_limited"
+                    : "error",
+              upstreamStatus: rejected ?? undefined,
+            });
+          }
+        } catch (err) {
+          console.error(`[csfloat] handler failed for "${marketHashName ?? "?"}":`, err);
+          return Response.json({
+            priceCents: null,
+            exactFloatMatch: false,
+            cached: false,
+            status: "error",
+          });
         }
       },
     },

@@ -16,7 +16,7 @@ export const MARKET_ADAPTERS: MarketAdapter[] = [
   {
     id: "steam",
     label: "Steam",
-    logo: "steam",
+    logo: "steam.png",
     enabled: true,
     scope: "all",
     /**
@@ -64,7 +64,7 @@ export const MARKET_ADAPTERS: MarketAdapter[] = [
   {
     id: "skinport",
     label: "Skinport",
-    logo: "skinport",
+    logo: "skinport.png",
     enabled: true,
     scope: "all",
     /**
@@ -102,7 +102,7 @@ export const MARKET_ADAPTERS: MarketAdapter[] = [
   {
     id: "marketcsgo",
     label: "Market.CSGO",
-    logo: "marketcsgo",
+    logo: "marketcsgo.png",
     enabled: true,
     scope: "inspect",
     itemUrl: (name) => `https://market.csgo.com/en/?search=${encodeURIComponent(name)}`,
@@ -136,7 +136,7 @@ export const MARKET_ADAPTERS: MarketAdapter[] = [
   {
     id: "csfloat",
     label: "CSFloat",
-    logo: "csfloat",
+    logo: "csfloat.png",
     enabled: true,
     scope: "all",
     itemUrl: (name) =>

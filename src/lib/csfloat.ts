@@ -2,12 +2,18 @@ import { useMutation } from "@tanstack/react-query";
 import { stripPhaseSuffix } from "@/lib/catalog/doppler";
 import { normalizeMarketHashName } from "@/lib/steamName";
 
+/** Why a lookup came back without a price, when it did. */
+export type CsfloatStatus = "ok" | "unauthorized" | "rate_limited" | "error";
+
 interface CsfloatPriceResponse {
   priceCents: number | null;
   exactFloatMatch?: boolean;
   cached?: boolean;
   stale?: boolean;
   listingCount?: number;
+  status?: CsfloatStatus;
+  /** The HTTP status CSFloat itself returned, when it refused us. */
+  upstreamStatus?: number;
   error?: string;
 }
 
@@ -16,7 +22,14 @@ export interface CsfloatPriceResult {
   priceEur: number | null;
   /** False when the price came from a fallback (any float) rather than the exact float requested. */
   exactFloatMatch: boolean;
-  listingCount?: number;
+  listingCount?: number | undefined;
+  /**
+   * "ok" even when there is no price — that just means no listing. The
+   * other values mean CSFloat refused the lookup, which is a different
+   * problem with a different fix (usually a missing API key on a cloud
+   * deployment) and must not be reported as "this skin has no listings".
+   */
+  status?: CsfloatStatus | undefined;
 }
 
 /**
@@ -93,7 +106,7 @@ export function useCsfloatPrice(usdToEurRate: number) {
       withCount?: boolean;
     }): Promise<CsfloatPriceResult> => {
       const marketHashName = toMarketHashName(name, wear, souvenir);
-      const { priceCents, exactFloatMatch, listingCount } = await fetchCsfloatPrice(
+      const { priceCents, exactFloatMatch, listingCount, status } = await fetchCsfloatPrice(
         marketHashName,
         paintIndex,
         phase,
@@ -104,13 +117,14 @@ export function useCsfloatPrice(usdToEurRate: number) {
       // portfolio would silently wipe out that holding's value and wreck
       // the profit/loss totals.
       if (priceCents === null || priceCents <= 0) {
-        return { priceEur: null, exactFloatMatch: false };
+        return { priceEur: null, exactFloatMatch: false, status: status ?? "ok" };
       }
       const usd = priceCents / 100;
       return {
         priceEur: usd / usdToEurRate,
         exactFloatMatch: exactFloatMatch ?? false,
         listingCount,
+        status: status ?? "ok",
       };
     },
   });
