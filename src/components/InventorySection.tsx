@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus,
   Trash2,
@@ -9,6 +9,7 @@ import {
   Pencil,
   Bell,
   BellRing,
+  Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Link } from "@tanstack/react-router";
@@ -58,6 +59,7 @@ import { showPriceToast, showFormToast } from "@/components/PriceToast";
 import { EditSkinDialog } from "@/components/EditSkinDialog";
 import { PriceAlertDialog } from "@/components/PriceAlertDialog";
 import { useAlerts } from "@/lib/alerts";
+import { usePortfolio } from "@/lib/portfolio";
 import { subjectFromSkin } from "@/lib/alertModel";
 import { cn } from "@/lib/utils";
 
@@ -71,6 +73,10 @@ export function InventorySection({
   const { t } = useI18n();
   const money = useMoney();
   const { marketplace, steamTaxPercent } = useMarketplace();
+  // The auto-load below is scoped per portfolio as well as per market:
+  // switching portfolio swaps the whole holdings list, so the pass has to
+  // run again for the new one.
+  const { activeId } = usePortfolio();
   const { alertFor, setAlert, removeAlert } = useAlerts();
   const { rates } = useCurrency();
   const csfloatPrice = useCsfloatPrice(rates.usd);
@@ -107,6 +113,14 @@ export function InventorySection({
   // at once, and every row that is genuinely in flight should say so.
   const [refreshingIds, setRefreshingIds] = useState<ReadonlySet<string>>(() => new Set<string>());
   const [refreshingAll, setRefreshingAll] = useState(false);
+  /**
+   * Rows waiting for their FIRST price on the current market.
+   *
+   * Separate from `refreshingIds` (which spins one row's refresh button):
+   * this is what turns the price cell into a loading state instead of the
+   * "No listings" that a not-yet-fetched market would otherwise claim.
+   */
+  const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(() => new Set<string>());
   const [editing, setEditing] = useState<Skin | null>(null);
   const [alerting, setAlerting] = useState<Skin | null>(null);
   const [marketPrice, setMarketPrice] = useState("");
@@ -420,6 +434,114 @@ export function InventorySection({
    * This deliberately does NOT pass `force`, so anything already refreshed
    * within the cache window is served from cache and costs no API call.
    */
+  /**
+   * Switching the price source has to change what is on screen.
+   *
+   * The table renders whatever is stored for the ACTIVE market, and nothing
+   * used to fetch when that market changed — so picking Steam after
+   * Skinport left every row on either a months-old Steam figure or a bare
+   * "No listings", with no request made and no way to tell which. The
+   * refresh button was the only thing that ever asked, and a price source
+   * you have to manually refresh after choosing it is not a source you can
+   * trust at a glance.
+   *
+   * So: the moment the source changes, every holding without a price on it
+   * goes to LOADING (see `pendingIds`) and one pass is kicked off for the
+   * newly selected market. The pass runs through the same `refreshOne` as
+   * everything else, so it goes to that market's own route
+   * (/api/steam-price, /api/csfloat-price, /api/skinport-price) and through
+   * the same client cache — flipping back and forth is free.
+   */
+  // Every (portfolio, market) pair already loaded in this session. A SET,
+  // not a single key: flipping Steam → CSFloat → Steam must not re-fetch
+  // a market that was priced a moment ago.
+  const autoLoadedKeysRef = useRef<Set<string>>(new Set());
+  // Read inside the effect without making the effect depend on it: `skins`
+  // gets a new identity on every price write, and depending on it here
+  // would restart the pass it just finished.
+  const openSkinsRef = useRef(openSkins);
+  openSkinsRef.current = openSkins;
+
+  useEffect(() => {
+    if (!supportsLivePrices) return;
+
+    // Whatever was loading belonged to the market we just left. Clearing
+    // it first is what stops a row from being stuck on "Loading…" when the
+    // user switches away mid-pass and comes back to a market that has
+    // already been priced (so the pass below returns early).
+    setPendingIds((prev) => (prev.size === 0 ? prev : new Set<string>()));
+
+    // Captured once: the Set's identity never changes, and reading it
+    // through the ref inside the cleanup is what the exhaustive-deps rule
+    // (rightly) warns about.
+    const loadedKeys = autoLoadedKeysRef.current;
+    const key = `${activeId}::${marketplace}`;
+    if (loadedKeys.has(key)) return;
+
+    /**
+     * Nothing to price yet — and crucially, NOT something to remember.
+     *
+     * The holdings arrive from localStorage one render after mount, so the
+     * very first run of this effect sees an empty list. Marking the market
+     * as "loaded" there is what silently broke the toggle: the provider
+     * starts on Steam by default, that first empty pass claimed
+     * `<portfolio>::steam`, and every later click on Steam then found the
+     * market already done and never fetched anything. `openSkins.length` is
+     * in the deps so the pass runs for real once the list lands.
+     */
+    const targets = openSkinsRef.current;
+    if (targets.length === 0) return;
+
+    // Claimed now so two renders cannot start the same pass, but only KEPT
+    // if the pass runs to the end — a pass abandoned half way through
+    // (the user kept clicking) must be retried the next time that market
+    // is selected, not remembered as done.
+    loadedKeys.add(key);
+    let completed = false;
+    let cancelled = false;
+    // Rows with nothing to show for this market are the ones that must
+    // read as "loading" rather than as "this item has no listings".
+    const missing = targets.filter((s) => s.marketPrices[marketplace] === undefined);
+    setPendingIds(new Set(missing.map((s) => s.id)));
+
+    void (async () => {
+      let cursor = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(REFRESH_CONCURRENCY, targets.length) }, async () => {
+          for (;;) {
+            if (cancelled) return;
+            const next = targets[cursor++];
+            if (!next) return;
+            // Quiet on purpose: this is a consequence of a click on the
+            // source toggle, not of a click on a row. Failures show up as
+            // that row keeping its previous value.
+            await refreshOne(next);
+            if (!cancelled) {
+              setPendingIds((prev) => {
+                if (!prev.has(next.id)) return prev;
+                const rest = new Set(prev);
+                rest.delete(next.id);
+                return rest;
+              });
+            }
+          }
+        }),
+      );
+      if (!cancelled) {
+        completed = true;
+        setPendingIds(new Set());
+      }
+    })();
+
+    return () => {
+      // Switching again mid-pass: stop feeding the old market's queue and
+      // let the new effect own the loading state.
+      cancelled = true;
+      if (!completed) loadedKeys.delete(key);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marketplace, activeId, supportsLivePrices, openSkins.length]);
+
   const refreshAllPrices = async () => {
     setRefreshingAll(true);
     let updated = 0;
@@ -1006,6 +1128,14 @@ export function InventorySection({
                             {money(unitPrice!)} {t("unitPrice")}
                           </span>
                         )}
+                      </span>
+                    ) : // Waiting on THIS market's answer. Saying "no
+                    // listings" here would be a claim about the item; the
+                    // truth is only that we have not asked yet.
+                    pendingIds.has(s.id) || refreshingIds.has(s.id) ? (
+                      <span className="inline-flex items-center justify-end gap-1.5 text-xs text-muted-foreground">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                        {t("loadingPrice")}
                       </span>
                     ) : // A Steam gem quote is deliberately withheld rather
                     // than showing the all-phase floor, which would be far
