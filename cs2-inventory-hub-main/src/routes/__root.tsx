@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { PriceDumpProvider } from "@/lib/priceDumpStore";
 import {
   Outlet,
   Link,
@@ -139,8 +140,12 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
+      {/* Downloads the whole price dump once and holds it in memory, so no
+          row in any table ever makes a price request of its own. */}
+      <PriceDumpProvider>
+        {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+        <Outlet />
+      </PriceDumpProvider>
       <Toaster
         position="top-right"
         // expand keeps stacked toasts readable instead of collapsing

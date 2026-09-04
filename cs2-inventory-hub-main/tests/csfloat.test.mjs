@@ -40,6 +40,13 @@ function stubFetch(listings, status = 200) {
  * clear them explicitly rather than relying on a new module instance.
  */
 async function handler() {
+  // These tests are about the LIVE CSFloat path, which is now opt-in: the
+  // route answers from the shared price dump by default. Turning the dump
+  // off and the live path on is what keeps them testing the code they were
+  // written for.
+  process.env.PRICE_DUMP_URL = "off";
+  process.env.CSFLOAT_LIVE = "1";
+  delete globalThis.__cs2hub_price_dump__;
   delete globalThis.__cs2hub_csfloat_cache__;
   delete globalThis.__cs2hub_csfloat_inflight__;
   delete globalThis.__cs2hub_csfloat_throttle__;

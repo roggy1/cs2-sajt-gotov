@@ -6,6 +6,7 @@ import {
   type SteamQuote,
 } from "@/lib/server/steamMarket.server";
 import { normalizeMarketHashName } from "@/lib/steamName";
+import { dumpQuote, dumpSnapshot } from "@/lib/server/priceDump.server";
 
 // Re-exported so existing importers (and tests) keep working — the parser
 // itself now lives with the rest of the Steam logic.
@@ -235,15 +236,51 @@ function quoteFromFeed(row: FeedRow, withVolume: boolean): SteamQuote {
  * With no feed configured this collapses to "ask Steam", i.e. the previous
  * behaviour, unchanged.
  */
+/**
+ * Live Steam calls are OFF by default.
+ *
+ * Steam rate-limits per IP and a Vercel egress address is shared with every
+ * other tenant on the edge, so those calls came back 429 far more often
+ * than they came back with a price. The shared price dump answers the same
+ * question with no per-item budget at all, so it is now the source, and the
+ * per-item Steam path is opt-in for deployments with an IP of their own
+ * (a laptop, a VPS): set STEAM_LIVE=1.
+ */
+const STEAM_LIVE = process.env["STEAM_LIVE"] === "1";
+
 async function quoteFor(
   name: string,
   opts: { force: boolean; withCount: boolean; withVolume: boolean },
 ): Promise<SteamQuote> {
+  // 1. The shared multi-market dump: one download for the whole catalogue,
+  //    held in memory, no per-item budget to exhaust. This is the path
+  //    virtually every request now takes.
+  const fromDump = await dumpQuote(name, "steam", opts.force);
+  if (fromDump) {
+    return {
+      priceEur: fromDump.priceEur,
+      status: "ok",
+      // True in the sense the client cares about: served without a live
+      // marketplace call.
+      cached: true,
+      ...(fromDump.listingCount !== undefined ? { listingCount: fromDump.listingCount } : {}),
+    };
+  }
+
+  // 2. The legacy single-market feed, for deployments that configured one.
   const rows = await getFeed(opts.force);
   const row = rows?.get(normalizeMarketHashName(name));
+  if (row && (!opts.withCount || !STEAM_LIVE)) return quoteFromFeed(row, opts.withVolume);
 
-  // A count can only come from Steam. Everything else the feed can answer.
-  if (row && !opts.withCount) return quoteFromFeed(row, opts.withVolume);
+  // 3. Steam itself — only where that is actually viable.
+  if (!STEAM_LIVE) {
+    if (row) return quoteFromFeed(row, opts.withVolume);
+    // `fromDump === null` means the dump loaded and simply has no row for
+    // this item, which is a real answer. `undefined` means we could not
+    // read a dump at all, and claiming "no listings" for that would be a
+    // statement about the item rather than about our plumbing.
+    return { priceEur: null, status: fromDump === null ? "no_listings" : "error", cached: false };
+  }
 
   const quote = await getSteamQuote(name, opts);
   if (!row) return quote;
@@ -295,6 +332,7 @@ export const Route = createFileRoute("/api/steam-price")({
           const diagnostics = {
             "X-Steam-Limiter": JSON.stringify(limiterSnapshot()),
             "X-Steam-Feed": FEED_URL ? `${feed?.size ?? 0} rows` : "off",
+            "X-Price-Dump": JSON.stringify(dumpSnapshot()),
           };
 
           if (many) {

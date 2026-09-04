@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus,
   Trash2,
@@ -44,15 +44,19 @@ import {
   type Skin,
   type Wear,
 } from "@/lib/skins";
+import { usePriceDump } from "@/lib/priceDumpStore";
 import { WEARLESS_CATEGORIES } from "@/lib/catalog/types";
 import { catalogDisplayName, hasDopplerPhase, isDopplerGem } from "@/lib/catalog/doppler";
 import { useCatalog } from "@/lib/catalog/useCatalog";
 import { useMarketplace, MARKETPLACES, type MarketplaceId } from "@/lib/marketplace";
 import { availableWearsFor } from "@/lib/wear";
 import type { CatalogItem } from "@/lib/catalog/types";
-import { useCsfloatPrice, toMarketHashName } from "@/lib/csfloat";
-import { useSteamPrice, prefetchSteamPrices } from "@/lib/steam";
-import { useSkinportPrice } from "@/lib/skinport";
+// Only the name builder is still needed here. The per-item price hooks
+// (useCsfloatPrice / useSteamPrice / useSkinportPrice) are deliberately NOT
+// imported any more: this table must not be able to make a network request
+// for a price, and the surest way to guarantee that is to not have the
+// means.
+import { toMarketHashName } from "@/lib/csfloat";
 import { useCurrency } from "@/lib/currency";
 import { CatalogCombobox } from "@/components/CatalogCombobox";
 import { MarketLogo } from "@/components/MarketLogo";
@@ -80,12 +84,20 @@ export function InventorySection({
   const { activeId } = usePortfolio();
   const { alertFor, setAlert, removeAlert } = useAlerts();
   const { rates } = useCurrency();
-  const csfloatPrice = useCsfloatPrice(rates.usd);
-  const steamPrice = useSteamPrice();
-  const skinportPrice = useSkinportPrice();
+  /**
+   * The ONLY source of prices in this table.
+   *
+   * There used to be one network request per row per market — which is
+   * what filled the Network tab with `(pending)` /api/csfloat-price calls
+   * and got the app rate-limited. Every one of those is gone: the dump is
+   * downloaded once by the provider and every price below is a lookup in
+   * an object already in memory.
+   */
+  const priceDump = usePriceDump();
   // Every marketplace now has a live price source.
   const supportsLivePrices = true;
-  const livePriceBusy = csfloatPrice.isPending || steamPrice.isPending || skinportPrice.isPending;
+  /** True only while the one dump download is in the air — never per row. */
+  const livePriceBusy = priceDump.status === "loading";
   const activeMarketLabel = MARKETPLACES.find((m) => m.id === marketplace)?.label ?? "";
   const otherMarkets = MARKETPLACES.filter((m) => m.id !== marketplace);
 
@@ -108,20 +120,15 @@ export function InventorySection({
   const [isLegacySouvenir, setIsLegacySouvenir] = useState(false);
   const [buyPrice, setBuyPrice] = useState("");
   const [quantity, setQuantity] = useState("1");
-  // Which single row is currently fetching. Tracked by id so one row's
-  // refresh never puts every other row into a loading state.
-  // A SET, not a single id: the bulk refresh now runs several holdings
-  // at once, and every row that is genuinely in flight should say so.
-  const [refreshingIds, setRefreshingIds] = useState<ReadonlySet<string>>(() => new Set<string>());
-  const [refreshingAll, setRefreshingAll] = useState(false);
   /**
-   * Rows waiting for their FIRST price on the current market.
+   * Only the whole-portfolio refresh has a busy state now.
    *
-   * Separate from `refreshingIds` (which spins one row's refresh button):
-   * this is what turns the price cell into a loading state instead of the
-   * "No listings" that a not-yet-fetched market would otherwise claim.
+   * The per-row `refreshingIds` and `pendingIds` sets are gone with the
+   * requests they tracked: a row reads its price out of the dump in memory,
+   * so there is no moment at which a row is "waiting" for anything. A cell
+   * shows a price or it shows "No listings" — never a spinner.
    */
-  const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const [refreshingAll, setRefreshingAll] = useState(false);
   const [editing, setEditing] = useState<Skin | null>(null);
   const [alerting, setAlerting] = useState<Skin | null>(null);
   const [marketPrice, setMarketPrice] = useState("");
@@ -192,70 +199,32 @@ export function InventorySection({
     return unit * qty;
   })();
 
-  // Auto-fill the Market Price field with a live price when the active
-  // marketplace supports one and a real catalog item (has an image, so we
-  // know it wasn't just free-typed partial text) is selected. Debounced so
-  // adjusting the float value doesn't spam requests while typing.
+  // Auto-fill the Market Price field from the dump when a real catalog item
+  // is selected (it has an image, so we know it wasn't just free-typed
+  // partial text). This used to fire a debounced request per keystroke on
+  // the float field; it is now a lookup in memory, so there is nothing to
+  // debounce and nothing to cancel.
   useEffect(() => {
     if (!supportsLivePrices || !name.trim() || !image) return;
-
-    const applyPrice = (priceEur: number | null) => {
-      if (priceEur === null) return;
-      setMarketPrice(priceEur.toFixed(2));
-      setErrors((prev) => (prev.marketPrice ? { ...prev, marketPrice: undefined } : prev));
-    };
-
-    const timeout = setTimeout(() => {
-      if (marketplace === "csfloat") {
-        const floatNum = floatValue !== "" ? Number(floatValue) : undefined;
-        csfloatPrice.mutate(
-          {
-            name: name.trim(),
-            wear: showWear ? wear : undefined,
-            souvenir: showSouvenir && souvenir,
-            paintIndex,
-            phase,
-            floatValue: floatNum !== undefined && Number.isFinite(floatNum) ? floatNum : undefined,
-          },
-          { onSuccess: (result) => applyPrice(result.priceEur) },
-        );
-      } else if (marketplace === "skinport") {
-        skinportPrice.mutate(
-          {
-            name: name.trim(),
-            wear: showWear ? wear : undefined,
-            souvenir: showSouvenir && souvenir,
-            phase,
-          },
-          { onSuccess: (result) => applyPrice(result.priceEur) },
-        );
-      } else {
-        steamPrice.mutate(
-          {
-            name: name.trim(),
-            wear: showWear ? wear : undefined,
-            souvenir: showSouvenir && souvenir,
-            phase,
-            paintIndex,
-          },
-          { onSuccess: (result) => applyPrice(result.priceEur) },
-        );
-      }
-    }, 500);
-
-    return () => clearTimeout(timeout);
+    const price = priceDump.quote(
+      toMarketHashName(name.trim(), showWear ? wear : undefined, showSouvenir && souvenir),
+      marketplace,
+    )?.priceEur;
+    // A missing price leaves the field alone rather than writing 0.00 — an
+    // empty field is a question, a zero is a wrong answer.
+    if (price === undefined) return;
+    setMarketPrice(price.toFixed(2));
+    setErrors((prev) => (prev.marketPrice ? { ...prev, marketPrice: undefined } : prev));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     marketplace,
     supportsLivePrices,
+    priceDump,
     name,
     image,
     wear,
     souvenir,
     showSouvenir,
-    paintIndex,
-    phase,
-    floatValue,
     showWear,
   ]);
 
@@ -269,6 +238,20 @@ export function InventorySection({
   const missingCount = countMissingPrices(openSkins, marketplace);
 
   /**
+   * One holding's price on the active market, straight out of the dump.
+   *
+   * Synchronous by design: there is nothing to await, which is exactly why
+   * no row can be left spinning. `null` means the dump has no price for
+   * this item, and the row says so.
+   */
+  const dumpPriceFor = useCallback(
+    (skin: { name: string; wear?: string | undefined; souvenir?: boolean | undefined }) =>
+      priceDump.quote(toMarketHashName(skin.name, skin.wear, skin.souvenir), marketplace)
+        ?.priceEur ?? null,
+    [priceDump, marketplace],
+  );
+
+  /**
    * Maps a holding to its catalog entry so the row can link to /item/$id.
    * Matched on the phase-stripped, prefix-stripped name because the
    * catalog's display name carries our own additions.
@@ -280,301 +263,116 @@ export function InventorySection({
   }, [catalogItems]);
 
   /**
-   * Fetches a live price for ONE holding from whichever marketplace is
-   * active, and writes it back under that marketplace's key.
+   * Re-reads ONE holding's price from the dump and writes it back under the
+   * active market's key.
    *
-   * Deliberately scoped to a single item: clicking a row's refresh spins
-   * that row only and never re-prices the whole portfolio. A null/failed
-   * result NEVER overwrites an existing price, so a rate limit can't wipe
-   * the portfolio.
+   * No network. This used to be a per-item `fetch` to /api/csfloat-price or
+   * /api/steam-price — one per row, queued behind each other, and the
+   * source of every `(pending)` request in the Network tab. The row's
+   * refresh button now just re-reads the store, so it is instant and can
+   * never hang.
+   *
+   * A missing price NEVER overwrites an existing one: a gap in the dump
+   * must not wipe a figure the user already has.
    */
-  const refreshOne = async (skin: Skin, opts?: { notify?: boolean; force?: boolean }) => {
+  const refreshOne = (skin: Skin, opts?: { notify?: boolean }) => {
     if (!supportsLivePrices) return false;
-    setRefreshingIds((prev) => new Set(prev).add(skin.id));
-    try {
-      let priceEur: number | null = null;
-      let successMessage = t("priceUpdated");
 
-      if (marketplace === "csfloat") {
-        const result = await csfloatPrice.mutateAsync({
-          name: skin.name,
-          wear: skin.wear,
-          souvenir: skin.souvenir,
-          paintIndex: skin.paintIndex,
-          phase: skin.phase,
-          floatValue: skin.floatValue,
-        });
-        priceEur = result.priceEur;
-        // The lookup is no longer float-conditional, so a price is simply
-        // the market's cheapest Buy Now listing and "no price" means the
-        // item has no listings at all — not that this copy's float could
-        // not be matched, which is what the old wording claimed.
-        successMessage = t("csfloatUpdated");
-        if (priceEur === null && opts?.notify) {
-          showPriceToast({
-            variant: "warning",
-            title: t("noListings"),
-            description: catalogDisplayName(skin),
-            market: marketplace,
-          });
-        }
-      } else if (marketplace === "skinport") {
-        const result = await skinportPrice.mutateAsync({
-          name: skin.name,
-          wear: skin.wear,
-          souvenir: skin.souvenir,
-          phase: skin.phase,
-          force: opts?.force ?? false,
-        });
-        priceEur = result.priceEur;
-        if (priceEur === null && opts?.notify) {
-          showPriceToast({
-            variant: "warning",
-            title: t("noListings"),
-            description: catalogDisplayName(skin),
-            market: marketplace,
-          });
-        } else if (result.cached) {
-          successMessage = `${t("priceUpdated")} (${t("priceCached")})`;
-        }
-      } else {
-        const result = await steamPrice.mutateAsync({
-          name: skin.name,
-          wear: skin.wear,
-          souvenir: skin.souvenir,
-          phase: skin.phase,
-          paintIndex: skin.paintIndex,
-          force: opts?.force ?? false,
-        });
-        priceEur = result.priceEur;
-        if (result.status === "phase_unsupported") {
-          if (opts?.notify) {
-            showPriceToast({
-              variant: "warning",
-              title: t("gemNotOnSteam"),
-              description: catalogDisplayName(skin),
-              market: marketplace,
-            });
-          }
-        } else if (result.status === "rate_limited") {
-          if (opts?.notify) {
-            showPriceToast({
-              variant: "warning",
-              title: t("priceRateLimited"),
-              description: catalogDisplayName(skin),
-              market: marketplace,
-            });
-          }
-        } else if (priceEur === null && opts?.notify) {
-          showPriceToast({
-            variant: "warning",
-            title: t("noListings"),
-            description: catalogDisplayName(skin),
-            market: marketplace,
-          });
-        } else if (result.cached) {
-          successMessage = `${t("priceUpdated")} (${t("priceCached")})`;
-        }
-      }
-
-      if (priceEur === null) return false;
-
-      setSkins((prev) =>
-        prev.map((x) =>
-          x.id === skin.id
-            ? { ...x, marketPrices: { ...x.marketPrices, [marketplace]: priceEur } }
-            : x,
-        ),
-      );
-      if (opts?.notify) {
-        showPriceToast({
-          variant: "success",
-          title: successMessage,
-          description: catalogDisplayName(skin),
-          market: marketplace,
-        });
-      }
-      return true;
-    } catch {
+    const priceEur = dumpPriceFor(skin);
+    if (priceEur === null) {
       if (opts?.notify) {
         showPriceToast({
           variant: "warning",
-          title: t("csfloatFetchError"),
+          title: t("noListings"),
           description: catalogDisplayName(skin),
           market: marketplace,
         });
       }
       return false;
-    } finally {
-      setRefreshingIds((prev) => {
-        const next = new Set(prev);
-        next.delete(skin.id);
-        return next;
+    }
+
+    setSkins((prev) =>
+      prev.map((x) =>
+        x.id === skin.id
+          ? { ...x, marketPrices: { ...x.marketPrices, [marketplace]: priceEur } }
+          : x,
+      ),
+    );
+    if (opts?.notify) {
+      showPriceToast({
+        variant: "success",
+        title: t("priceUpdated"),
+        description: catalogDisplayName(skin),
+        market: marketplace,
       });
     }
+    return true;
   };
 
   /**
-   * How many holdings are priced at once.
+   * Prices every holding from the dump, for the market on screen.
    *
-   * The old version did one at a time, which on Steam meant every holding
-   * waited out the previous one's server-side 2.5s gap — forty skins took
-   * minutes. Pacing is now the server limiter's job (it backs off only when
-   * Steam actually pushes back), so the client's job is just to not open an
-   * unbounded number of sockets.
+   * This one effect replaces the entire asynchronous machinery that used to
+   * live here: a worker pool, a per-item "already loaded" ledger, a pending
+   * set driving per-row spinners, and one HTTP request per holding per
+   * market. All of it existed to manage requests that no longer happen.
+   *
+   * Because the dump is already in memory, the pass is a synchronous map
+   * over the holdings — every row gets its number in the same render, and
+   * switching price source re-runs it against a different key of the same
+   * object. No request is made, so there is nothing to wait for and no row
+   * can be left on "Loading…".
+   *
+   * A holding the dump does not cover is left untouched rather than
+   * written as 0, and the row renders "No listings".
    */
-  const REFRESH_CONCURRENCY = 6;
-
-  /**
-   * Refreshes every holding.
-   *
-   * On Steam this starts with ONE batch request that warms the server cache
-   * for the whole portfolio, so the per-holding calls that follow are cache
-   * hits rather than N separate trips out to Steam.
-   *
-   * This deliberately does NOT pass `force`, so anything already refreshed
-   * within the cache window is served from cache and costs no API call.
-   */
-  /**
-   * Switching the price source has to change what is on screen.
-   *
-   * The table renders whatever is stored for the ACTIVE market, and nothing
-   * used to fetch when that market changed — so picking Steam after
-   * Skinport left every row on either a months-old Steam figure or a bare
-   * "No listings", with no request made and no way to tell which. The
-   * refresh button was the only thing that ever asked, and a price source
-   * you have to manually refresh after choosing it is not a source you can
-   * trust at a glance.
-   *
-   * So: the moment the source changes, every holding without a price on it
-   * goes to LOADING (see `pendingIds`) and one pass is kicked off for the
-   * newly selected market. The pass runs through the same `refreshOne` as
-   * everything else, so it goes to that market's own route
-   * (/api/steam-price, /api/csfloat-price, /api/skinport-price) and through
-   * the same client cache — flipping back and forth is free.
-   */
-  /**
-   * Every (portfolio, market, ITEM) already priced in this session.
-   *
-   * Keyed per item, not per market. A market-level key looked equivalent
-   * and was not: it made "this market is done" a permanent statement, so a
-   * skin added AFTER the first pass was never fetched at all — the effect
-   * re-ran (the list got longer), saw the market already claimed, and
-   * returned. The new row then sat at whatever the add form had put in it.
-   *
-   * Per-item keys keep the property that actually mattered — flipping
-   * Steam → CSFloat → Steam does not re-fetch what was just priced —
-   * while a new holding is simply an id nobody has claimed yet.
-   */
-  const autoLoadedRef = useRef<Set<string>>(new Set());
-  // Read inside the effect without making the effect depend on it: `skins`
-  // gets a new identity on every price write, and depending on it here
-  // would restart the pass it just finished.
-  const openSkinsRef = useRef(openSkins);
-  openSkinsRef.current = openSkins;
-
   useEffect(() => {
-    if (!supportsLivePrices) return;
+    if (!supportsLivePrices || priceDump.status !== "ready") return;
 
-    // Whatever was loading belonged to the market we just left. Clearing
-    // it first is what stops a row from being stuck on "Loading…" when the
-    // user switches away mid-pass and comes back to a market that has
-    // already been priced (so the pass below returns early).
-    setPendingIds((prev) => (prev.size === 0 ? prev : new Set<string>()));
-
-    // Captured once: the Set's identity never changes, and reading it
-    // through the ref inside the cleanup is what the exhaustive-deps rule
-    // (rightly) warns about.
-    const loaded = autoLoadedRef.current;
-    const keyFor = (id: string) => `${activeId}::${marketplace}::${id}`;
-
-    // Ask only for what is actually missing: an item this market has never
-    // been asked about, and that carries no usable price for it. A holding
-    // added a second ago qualifies; one priced a moment ago does not.
-    const targets = openSkinsRef.current.filter(
-      (s) => !loaded.has(keyFor(s.id)) && getMarketPrice(s, marketplace) === undefined,
-    );
-    if (targets.length === 0) return;
-
-    // Claimed now so two renders cannot start the same pass, but only KEPT
-    // for the items the pass actually reached — anything left when the
-    // user switches away mid-pass must be retried, not remembered as done.
-    for (const s of targets) loaded.add(keyFor(s.id));
-    const unreached = new Set(targets.map((s) => s.id));
-    let cancelled = false;
-
-    // Rows with nothing to show for this market are the ones that must
-    // read as "loading" rather than as "this item has no listings".
-    setPendingIds(new Set(targets.map((s) => s.id)));
-
-    void (async () => {
-      let cursor = 0;
-      await Promise.all(
-        Array.from({ length: Math.min(REFRESH_CONCURRENCY, targets.length) }, async () => {
-          for (;;) {
-            if (cancelled) return;
-            const next = targets[cursor++];
-            if (!next) return;
-            // Quiet on purpose: this is a consequence of a click on the
-            // source toggle, not of a click on a row. Failures show up as
-            // that row keeping its previous value.
-            await refreshOne(next);
-            unreached.delete(next.id);
-            if (!cancelled) {
-              setPendingIds((prev) => {
-                if (!prev.has(next.id)) return prev;
-                const rest = new Set(prev);
-                rest.delete(next.id);
-                return rest;
-              });
-            }
-          }
-        }),
-      );
-      if (!cancelled) setPendingIds(new Set());
-    })();
-
-    return () => {
-      // Switching again mid-pass: stop feeding the old market's queue and
-      // let the new effect own the loading state.
-      cancelled = true;
-      for (const id of unreached) loaded.delete(keyFor(id));
-    };
+    setSkins((prev) => {
+      let changed = false;
+      const next = prev.map((skin) => {
+        if (skin.sold) return skin;
+        const price = priceDump.quote(
+          toMarketHashName(skin.name, skin.wear, skin.souvenir),
+          marketplace,
+        )?.priceEur;
+        if (price === undefined || skin.marketPrices[marketplace] === price) return skin;
+        changed = true;
+        return { ...skin, marketPrices: { ...skin.marketPrices, [marketplace]: price } };
+      });
+      // Same array when nothing moved: this effect runs on every dump or
+      // market change, and returning a new array each time would write to
+      // localStorage and re-render the whole table for no reason.
+      return changed ? next : prev;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [marketplace, activeId, supportsLivePrices, openSkins.length]);
+  }, [priceDump, marketplace, activeId, supportsLivePrices, openSkins.length]);
 
+  /**
+   * Re-prices everything.
+   *
+   * Downloads a fresh dump — ONE request for the whole catalogue, not one
+   * per holding — and the effect above then re-applies it to every row.
+   */
   const refreshAllPrices = async () => {
     setRefreshingAll(true);
-    let updated = 0;
     try {
-      if (marketplace === "steam") {
-        await prefetchSteamPrices(
-          openSkins.map((s) => toMarketHashName(s.name, s.wear, s.souvenir)),
-        );
-      }
-
-      // A fixed pool of workers pulling from one shared cursor: keeps
-      // exactly REFRESH_CONCURRENCY requests in flight without waiting for
-      // a whole batch to finish before starting the next.
-      let cursor = 0;
-      await Promise.all(
-        Array.from({ length: Math.min(REFRESH_CONCURRENCY, openSkins.length) }, async () => {
-          for (;;) {
-            const next = openSkins[cursor++];
-            if (!next) return;
-            if (await refreshOne(next)) updated++;
-          }
-        }),
-      );
+      await priceDump.refresh();
+      const updated = openSkins.filter((s) => dumpPriceFor(s) !== null).length;
       // Deliberately a single grouped toast: refreshing 40 skins should
       // not fire 40 notifications.
       showPriceToast({
         variant: updated > 0 ? "success" : "warning",
         title: t("refreshedCount").replace("{count}", String(updated)),
-        description:
-          updated < skins.length
-            ? t("refreshedSkipped").replace("{count}", String(openSkins.length - updated))
-            : undefined,
+        ...(updated < openSkins.length
+          ? {
+              description: t("refreshedSkipped").replace(
+                "{count}",
+                String(openSkins.length - updated),
+              ),
+            }
+          : {}),
         market: marketplace,
       });
     } finally {
@@ -688,7 +486,7 @@ export function InventorySection({
             variant="outline"
             size="sm"
             className="ml-auto gap-2"
-            disabled={refreshingAll || refreshingIds.size > 0}
+            disabled={refreshingAll}
             onClick={() => void refreshAllPrices()}
           >
             <RefreshCw className={cn("h-3.5 w-3.5", refreshingAll && "animate-spin")} />
@@ -873,12 +671,11 @@ export function InventorySection({
                   {t("baseFloor")}
                 </span>
               )}
-              {/* Only the form's own auto-fetch should spin here — a row's
-                  refresh shares the same mutation but is not this field. */}
-              {supportsLivePrices &&
-                livePriceBusy &&
-                refreshingIds.size === 0 &&
-                !refreshingAll && <RefreshCw className="h-3 w-3 animate-spin text-primary" />}
+              {/* The one place a spinner is still honest: the single dump
+                  download, which the whole page shares. */}
+              {supportsLivePrices && livePriceBusy && !refreshingAll && (
+                <RefreshCw className="h-3 w-3 animate-spin text-primary" />
+              )}
             </span>
           }
           error={errors.marketPrice}
@@ -1140,14 +937,6 @@ export function InventorySection({
                           </span>
                         )}
                       </span>
-                    ) : // Waiting on THIS market's answer. Saying "no
-                    // listings" here would be a claim about the item; the
-                    // truth is only that we have not asked yet.
-                    pendingIds.has(s.id) || refreshingIds.has(s.id) ? (
-                      <span className="inline-flex items-center justify-end gap-1.5 text-xs text-muted-foreground">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-                        {t("loadingPrice")}
-                      </span>
                     ) : // A Steam gem quote is deliberately withheld rather
                     // than showing the all-phase floor, which would be far
                     // below the gem's real value.
@@ -1204,14 +993,11 @@ export function InventorySection({
                           variant="ghost"
                           size="icon"
                           aria-label={t("refreshCsfloatPrice")}
-                          disabled={refreshingIds.has(s.id) || refreshingAll}
-                          onClick={() => void refreshOne(s, { notify: true, force: true })}
+                          disabled={refreshingAll}
+                          onClick={() => refreshOne(s, { notify: true })}
                         >
                           <RefreshCw
-                            className={cn(
-                              "h-4 w-4 text-primary",
-                              refreshingIds.has(s.id) && "animate-spin",
-                            )}
+                            className={cn("h-4 w-4 text-primary", refreshingAll && "animate-spin")}
                           />
                         </Button>
                       )}

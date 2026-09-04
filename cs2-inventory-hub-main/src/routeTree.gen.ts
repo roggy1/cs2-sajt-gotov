@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ApiCsfloatPriceRouteImport } from './routes/api/csfloat-price'
 import { Route as ApiMarketcsgoPriceRouteImport } from './routes/api/marketcsgo-price'
+import { Route as ApiPricesRouteImport } from './routes/api/prices'
 import { Route as ApiSkinportHistoryRouteImport } from './routes/api/skinport-history'
 import { Route as ApiSkinportPriceRouteImport } from './routes/api/skinport-price'
 import { Route as ApiSteamCallbackRouteImport } from './routes/api/steam-callback'
@@ -41,6 +42,11 @@ const ApiCsfloatPriceRoute = ApiCsfloatPriceRouteImport.update({
 const ApiMarketcsgoPriceRoute = ApiMarketcsgoPriceRouteImport.update({
   id: '/api/marketcsgo-price',
   path: '/api/marketcsgo-price',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPricesRoute = ApiPricesRouteImport.update({
+  id: '/api/prices',
+  path: '/api/prices',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiSkinportHistoryRoute = ApiSkinportHistoryRouteImport.update({
@@ -94,6 +100,7 @@ export interface FileRoutesByFullPath {
   '/profile': typeof ProfileRoute
   '/api/csfloat-price': typeof ApiCsfloatPriceRoute
   '/api/marketcsgo-price': typeof ApiMarketcsgoPriceRoute
+  '/api/prices': typeof ApiPricesRoute
   '/api/skinport-history': typeof ApiSkinportHistoryRoute
   '/api/skinport-price': typeof ApiSkinportPriceRoute
   '/api/steam-callback': typeof ApiSteamCallbackRoute
@@ -109,6 +116,7 @@ export interface FileRoutesByTo {
   '/profile': typeof ProfileRoute
   '/api/csfloat-price': typeof ApiCsfloatPriceRoute
   '/api/marketcsgo-price': typeof ApiMarketcsgoPriceRoute
+  '/api/prices': typeof ApiPricesRoute
   '/api/skinport-history': typeof ApiSkinportHistoryRoute
   '/api/skinport-price': typeof ApiSkinportPriceRoute
   '/api/steam-callback': typeof ApiSteamCallbackRoute
@@ -125,6 +133,7 @@ export interface FileRoutesById {
   '/profile': typeof ProfileRoute
   '/api/csfloat-price': typeof ApiCsfloatPriceRoute
   '/api/marketcsgo-price': typeof ApiMarketcsgoPriceRoute
+  '/api/prices': typeof ApiPricesRoute
   '/api/skinport-history': typeof ApiSkinportHistoryRoute
   '/api/skinport-price': typeof ApiSkinportPriceRoute
   '/api/steam-callback': typeof ApiSteamCallbackRoute
@@ -142,6 +151,7 @@ export interface FileRouteTypes {
     | '/profile'
     | '/api/csfloat-price'
     | '/api/marketcsgo-price'
+    | '/api/prices'
     | '/api/skinport-history'
     | '/api/skinport-price'
     | '/api/steam-callback'
@@ -157,6 +167,7 @@ export interface FileRouteTypes {
     | '/profile'
     | '/api/csfloat-price'
     | '/api/marketcsgo-price'
+    | '/api/prices'
     | '/api/skinport-history'
     | '/api/skinport-price'
     | '/api/steam-callback'
@@ -172,6 +183,7 @@ export interface FileRouteTypes {
     | '/profile'
     | '/api/csfloat-price'
     | '/api/marketcsgo-price'
+    | '/api/prices'
     | '/api/skinport-history'
     | '/api/skinport-price'
     | '/api/steam-callback'
@@ -188,6 +200,7 @@ export interface RootRouteChildren {
   ProfileRoute: typeof ProfileRoute
   ApiCsfloatPriceRoute: typeof ApiCsfloatPriceRoute
   ApiMarketcsgoPriceRoute: typeof ApiMarketcsgoPriceRoute
+  ApiPricesRoute: typeof ApiPricesRoute
   ApiSkinportHistoryRoute: typeof ApiSkinportHistoryRoute
   ApiSkinportPriceRoute: typeof ApiSkinportPriceRoute
   ApiSteamCallbackRoute: typeof ApiSteamCallbackRoute
@@ -227,6 +240,13 @@ declare module '@tanstack/react-router' {
       path: '/api/marketcsgo-price'
       fullPath: '/api/marketcsgo-price'
       preLoaderRoute: typeof ApiMarketcsgoPriceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/prices': {
+      id: '/api/prices'
+      path: '/api/prices'
+      fullPath: '/api/prices'
+      preLoaderRoute: typeof ApiPricesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/skinport-history': {
@@ -300,6 +320,7 @@ const rootRouteChildren: RootRouteChildren = {
   ProfileRoute: ProfileRoute,
   ApiCsfloatPriceRoute: ApiCsfloatPriceRoute,
   ApiMarketcsgoPriceRoute: ApiMarketcsgoPriceRoute,
+  ApiPricesRoute: ApiPricesRoute,
   ApiSkinportHistoryRoute: ApiSkinportHistoryRoute,
   ApiSkinportPriceRoute: ApiSkinportPriceRoute,
   ApiSteamCallbackRoute: ApiSteamCallbackRoute,

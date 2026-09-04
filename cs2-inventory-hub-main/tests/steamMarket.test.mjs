@@ -5,6 +5,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+// The Steam route now answers from the shared price dump by default; these
+// tests exercise the live Steam layer, so the dump is switched off and the
+// live path switched on for them.
+process.env.PRICE_DUMP_URL = "off";
+process.env.STEAM_LIVE = "1";
+
 const MOD = "../src/lib/server/steamMarket.server.ts";
 const NAME = "AK-47 | Redline (Field-Tested)";
 

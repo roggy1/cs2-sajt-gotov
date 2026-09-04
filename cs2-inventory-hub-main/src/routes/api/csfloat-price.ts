@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { dumpQuote } from "@/lib/server/priceDump.server";
 
 // Server-side proxy for CSFloat (docs.csfloat.com). Runs only on the server:
 // the API key never reaches the browser, and server-to-server calls have no
@@ -518,7 +519,36 @@ interface QuoteResult {
  *   stale cache → answer NOW, refresh quietly behind
  *   nothing     → one throttled call, and on failure whatever we knew
  */
+/**
+ * Live CSFloat calls are OFF by default.
+ *
+ * CSFloat refuses a shared cloud IP long before it refuses a laptop, and on
+ * Vercel that address belongs to every tenant on the edge — which is where
+ * the 429s, the four-second queue and the `(pending)` requests all came
+ * from. The shared price dump answers the same question with one download
+ * for the entire catalogue, so it is now the source. Set CSFLOAT_LIVE=1 to
+ * re-enable the per-item path on a deployment with its own IP; everything
+ * below it (throttle, cooldown, SWR cache, deadline) is still here and
+ * still works.
+ */
+const CSFLOAT_LIVE = process.env["CSFLOAT_LIVE"] === "1";
+
 async function getQuote(key: string, params: LookupParams): Promise<QuoteResult> {
+  // The dump first, always: a Map read with no network, no rate limit and
+  // nothing to queue behind.
+  const fromDump = await dumpQuote(params.marketHashName, "csfloat", false);
+  if (fromDump) {
+    return {
+      priceCents: Math.round(fromDump.priceEur * 100),
+      // The dump carries no float data, so this is not a float-matched
+      // price and must not claim to be.
+      exactFloatMatch: false,
+      listingCount: fromDump.listingCount,
+      cached: true,
+      status: "ok",
+    };
+  }
+
   const entry = cache.get(key);
   const now = Date.now();
 
@@ -568,6 +598,27 @@ async function getQuote(key: string, params: LookupParams): Promise<QuoteResult>
       cached: true,
       stale: true,
       status: "ok",
+    };
+  }
+
+  // No dump row and no live path: say plainly that we have no price rather
+  // than reporting a market failure the user cannot act on.
+  if (!CSFLOAT_LIVE) {
+    if (entry && entry.priceCents !== null) {
+      return {
+        priceCents: entry.priceCents,
+        exactFloatMatch: entry.exactFloatMatch,
+        listingCount: entry.listingCount,
+        cached: true,
+        stale: true,
+        status: "ok",
+      };
+    }
+    return {
+      priceCents: null,
+      exactFloatMatch: false,
+      cached: false,
+      status: fromDump === null ? "ok" : "error",
     };
   }
 
