@@ -34,6 +34,7 @@ import {
   WEAR_STYLES,
   useMoney,
   getEffectivePrice,
+  getMarketPrice,
   getQuantity,
   getTotalPaid,
   isOpenPosition,
@@ -452,10 +453,20 @@ export function InventorySection({
    * (/api/steam-price, /api/csfloat-price, /api/skinport-price) and through
    * the same client cache — flipping back and forth is free.
    */
-  // Every (portfolio, market) pair already loaded in this session. A SET,
-  // not a single key: flipping Steam → CSFloat → Steam must not re-fetch
-  // a market that was priced a moment ago.
-  const autoLoadedKeysRef = useRef<Set<string>>(new Set());
+  /**
+   * Every (portfolio, market, ITEM) already priced in this session.
+   *
+   * Keyed per item, not per market. A market-level key looked equivalent
+   * and was not: it made "this market is done" a permanent statement, so a
+   * skin added AFTER the first pass was never fetched at all — the effect
+   * re-ran (the list got longer), saw the market already claimed, and
+   * returned. The new row then sat at whatever the add form had put in it.
+   *
+   * Per-item keys keep the property that actually mattered — flipping
+   * Steam → CSFloat → Steam does not re-fetch what was just priced —
+   * while a new holding is simply an id nobody has claimed yet.
+   */
+  const autoLoadedRef = useRef<Set<string>>(new Set());
   // Read inside the effect without making the effect depend on it: `skins`
   // gets a new identity on every price write, and depending on it here
   // would restart the pass it just finished.
@@ -474,35 +485,27 @@ export function InventorySection({
     // Captured once: the Set's identity never changes, and reading it
     // through the ref inside the cleanup is what the exhaustive-deps rule
     // (rightly) warns about.
-    const loadedKeys = autoLoadedKeysRef.current;
-    const key = `${activeId}::${marketplace}`;
-    if (loadedKeys.has(key)) return;
+    const loaded = autoLoadedRef.current;
+    const keyFor = (id: string) => `${activeId}::${marketplace}::${id}`;
 
-    /**
-     * Nothing to price yet — and crucially, NOT something to remember.
-     *
-     * The holdings arrive from localStorage one render after mount, so the
-     * very first run of this effect sees an empty list. Marking the market
-     * as "loaded" there is what silently broke the toggle: the provider
-     * starts on Steam by default, that first empty pass claimed
-     * `<portfolio>::steam`, and every later click on Steam then found the
-     * market already done and never fetched anything. `openSkins.length` is
-     * in the deps so the pass runs for real once the list lands.
-     */
-    const targets = openSkinsRef.current;
+    // Ask only for what is actually missing: an item this market has never
+    // been asked about, and that carries no usable price for it. A holding
+    // added a second ago qualifies; one priced a moment ago does not.
+    const targets = openSkinsRef.current.filter(
+      (s) => !loaded.has(keyFor(s.id)) && getMarketPrice(s, marketplace) === undefined,
+    );
     if (targets.length === 0) return;
 
     // Claimed now so two renders cannot start the same pass, but only KEPT
-    // if the pass runs to the end — a pass abandoned half way through
-    // (the user kept clicking) must be retried the next time that market
-    // is selected, not remembered as done.
-    loadedKeys.add(key);
-    let completed = false;
+    // for the items the pass actually reached — anything left when the
+    // user switches away mid-pass must be retried, not remembered as done.
+    for (const s of targets) loaded.add(keyFor(s.id));
+    const unreached = new Set(targets.map((s) => s.id));
     let cancelled = false;
+
     // Rows with nothing to show for this market are the ones that must
     // read as "loading" rather than as "this item has no listings".
-    const missing = targets.filter((s) => s.marketPrices[marketplace] === undefined);
-    setPendingIds(new Set(missing.map((s) => s.id)));
+    setPendingIds(new Set(targets.map((s) => s.id)));
 
     void (async () => {
       let cursor = 0;
@@ -516,6 +519,7 @@ export function InventorySection({
             // source toggle, not of a click on a row. Failures show up as
             // that row keeping its previous value.
             await refreshOne(next);
+            unreached.delete(next.id);
             if (!cancelled) {
               setPendingIds((prev) => {
                 if (!prev.has(next.id)) return prev;
@@ -527,17 +531,14 @@ export function InventorySection({
           }
         }),
       );
-      if (!cancelled) {
-        completed = true;
-        setPendingIds(new Set());
-      }
+      if (!cancelled) setPendingIds(new Set());
     })();
 
     return () => {
       // Switching again mid-pass: stop feeding the old market's queue and
       // let the new effect own the loading state.
       cancelled = true;
-      if (!completed) loadedKeys.delete(key);
+      for (const id of unreached) loaded.delete(keyFor(id));
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marketplace, activeId, supportsLivePrices, openSkins.length]);
@@ -612,12 +613,22 @@ export function InventorySection({
     setErrors({});
     const resolved: Category = effectiveCategory ?? "";
 
-    const marketPrices: Partial<Record<MarketplaceId, number>> = {
-      [marketplace]: Number(marketPrice),
+    // A price only goes in if it IS one. An empty, zero or unparseable
+    // field leaves the market unpriced, so the row reads as "no listings"
+    // and the auto-refresh pass below treats it as something still to ask
+    // about — rather than storing 0 and rendering a confident "0.00".
+    const marketPrices: Partial<Record<MarketplaceId, number>> = {};
+    const usable = (value: string | undefined): number | undefined => {
+      if (value === undefined || value.trim() === "") return undefined;
+      const n = Number(value);
+      return Number.isFinite(n) && n > 0 ? n : undefined;
     };
+
+    const own = usable(marketPrice);
+    if (own !== undefined) marketPrices[marketplace] = own;
     for (const m of otherMarkets) {
-      const v = otherPrices[m.id];
-      if (v !== undefined && v !== "") marketPrices[m.id] = Number(v);
+      const other = usable(otherPrices[m.id]);
+      if (other !== undefined) marketPrices[m.id] = other;
     }
 
     setSkins((prev) => [

@@ -15,6 +15,7 @@ import test from "node:test";
 
 import {
   countMissingPrices,
+  getMarketPrice,
   removeHolding,
   revertSale,
   soldHoldings,
@@ -236,4 +237,34 @@ test("editing one record leaves every other one alone", () => {
   // An id that is not there changes nothing at all.
   assert.deepEqual(updateSalePrice(withSale, "ghost", 1), withSale);
   assert.deepEqual(revertSale(withSale, "ghost"), withSale);
+});
+
+/* -------------------------------------------------------------------------
+ * Zero is not a price
+ *
+ * A freshly added holding whose lookup had not landed yet rendered a
+ * confident "0.00" — which reads as "this skin is worthless" rather than
+ * "we have no answer" — and, worse, counted as priced, so nothing ever
+ * went back to ask.
+ * ---------------------------------------------------------------------- */
+
+test("a stored 0 is not a price", () => {
+  const item = { ...skin({}), marketPrices: { steam: 0 } };
+
+  assert.equal(getMarketPrice(item, "steam"), undefined, "0.00 must read as no price");
+  assert.equal(getEffectivePrice(item, "steam", 15), undefined);
+  assert.equal(countMissingPrices([item], "steam"), 1, "and it must count as still missing");
+  assert.equal(sumHoldingsValue([item], "steam", 15), 0);
+});
+
+test("NaN and negatives are rejected the same way", () => {
+  for (const bad of [Number.NaN, -3, Number.POSITIVE_INFINITY]) {
+    const item = { ...skin({}), marketPrices: { steam: bad } };
+    assert.equal(getMarketPrice(item, "steam"), undefined, `${bad} is not a price`);
+  }
+});
+
+test("a real price still comes through untouched", () => {
+  const item = { ...skin({}), marketPrices: { steam: 12.5 } };
+  assert.equal(getMarketPrice(item, "steam"), 12.5);
 });

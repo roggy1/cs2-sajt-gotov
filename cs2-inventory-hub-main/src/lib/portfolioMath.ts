@@ -204,9 +204,23 @@ export function sumRealizedPnL(skins: Skin[]): number {
   }, 0);
 }
 
-/** The price of a skin on a given marketplace, or undefined if not entered. */
+/**
+ * The price of a skin on a given marketplace, or undefined if we don't
+ * have one.
+ *
+ * Zero is NOT a price, and neither is NaN. Both used to survive all the way
+ * to the table, where a brand new holding whose lookup had not landed yet
+ * rendered a confident "0.00" — a figure that reads as "this skin is
+ * worthless" rather than "we haven't got an answer". They also poisoned
+ * everything downstream: a 0 counts as "priced", so the auto-refresh pass
+ * skipped that row, and it silently dragged the portfolio total down.
+ *
+ * Rejecting them in ONE place means the table, the totals, the chart and
+ * the missing-price counter all agree on what "no price" means.
+ */
 export function getMarketPrice(skin: Skin, marketplace: MarketplaceId): number | undefined {
-  return skin.marketPrices[marketplace];
+  const raw = skin.marketPrices[marketplace];
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : undefined;
 }
 
 /**
@@ -223,7 +237,7 @@ export function getEffectivePrice(
   marketplace: MarketplaceId,
   steamTaxPercent: number,
 ): number | undefined {
-  const raw = skin.marketPrices[marketplace];
+  const raw = getMarketPrice(skin, marketplace);
   if (raw === undefined) return undefined;
   return netProceeds(raw, marketplace, {
     sellerFeePercent: steamTaxPercent,
@@ -245,7 +259,7 @@ export function getPositionValue(
 export function sumMarketValue(skins: Skin[], marketplace: MarketplaceId): number {
   return skins
     .filter(isOpenPosition)
-    .reduce((sum, s) => sum + (s.marketPrices[marketplace] ?? 0) * getQuantity(s), 0);
+    .reduce((sum, s) => sum + (getMarketPrice(s, marketplace) ?? 0) * getQuantity(s), 0);
 }
 
 /** Tax-aware version of sumMarketValue — nets out the Steam fee when applicable. */
@@ -268,7 +282,8 @@ export function sumEffectiveMarketValue(
  * there.
  */
 export function countMissingPrices(skins: Skin[], marketplace: MarketplaceId): number {
-  return skins.filter((s) => isOpenPosition(s) && s.marketPrices[marketplace] === undefined).length;
+  return skins.filter((s) => isOpenPosition(s) && getMarketPrice(s, marketplace) === undefined)
+    .length;
 }
 
 /** How many holdings are still owned — what the inventory table shows. */

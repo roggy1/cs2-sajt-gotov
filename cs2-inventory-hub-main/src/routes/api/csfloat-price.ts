@@ -53,7 +53,7 @@ const MAX_COOLDOWN_MS = 2 * 60 * 1000;
  * invocation open for twelve seconds is not — the platform kills it, and
  * the user gets a failure where a slightly older price would have done.
  */
-const MAX_QUEUE_WAIT_MS = 4_000;
+const MAX_QUEUE_WAIT_MS = 2_000;
 
 /**
  * How long we wait for CSFloat itself before giving up on the request.
@@ -61,10 +61,11 @@ const MAX_QUEUE_WAIT_MS = 4_000;
  * A serverless function that is still waiting on an upstream is a request
  * stuck on `Pending` in the browser, and because the client paces CSFloat
  * through a single queue, ONE pending request used to stall every item
- * behind it. Four seconds is well past CSFloat's normal response time, so
- * this only fires when the upstream has effectively stopped answering.
+ * behind it. Two and a half seconds is well past CSFloat's normal
+ * response time, and leaves room inside the 3s handler deadline below for
+ * the answer to actually be written.
  */
-const UPSTREAM_TIMEOUT_MS = Number(process.env["CSFLOAT_TIMEOUT_MS"] ?? "4000");
+const UPSTREAM_TIMEOUT_MS = Number(process.env["CSFLOAT_TIMEOUT_MS"] ?? "2500");
 
 /**
  * Hard ceiling on the whole handler.
@@ -75,7 +76,7 @@ const UPSTREAM_TIMEOUT_MS = Number(process.env["CSFLOAT_TIMEOUT_MS"] ?? "4000");
  * price, or nothing — and lets the refresh finish in the background. An
  * answer of `null` is a cell the user can look at; `Pending` is not.
  */
-const HANDLER_DEADLINE_MS = Number(process.env["CSFLOAT_DEADLINE_MS"] ?? "6000");
+const HANDLER_DEADLINE_MS = Number(process.env["CSFLOAT_DEADLINE_MS"] ?? "3000");
 
 // How many listings we pull per lookup. Doubles as the ceiling for the
 // reported listing count, so the two must never drift apart.
@@ -689,6 +690,11 @@ export const Route = createFileRoute("/api/csfloat-price")({
           // Whichever comes first: the real answer, or the deadline. The
           // lookup is not cancelled — it keeps running and populates the
           // cache, so the retry a few seconds later is an instant hit.
+          // If the deadline wins the race, nothing is left listening to
+          // `lookup` — this keeps a late rejection from surfacing as an
+          // unhandled rejection and taking the process down.
+          void lookup.catch(() => undefined);
+
           const deadline = deadlineAnswer(key);
           try {
             const quote = await Promise.race([lookup, deadline.answer]);
